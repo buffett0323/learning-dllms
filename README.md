@@ -8,7 +8,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/blo
 
 ### Inside the Model
 
-How a diffusion LLM is built, trained, and sampled.
+<!-- How a diffusion LLM is built, trained, and sampled. -->
 
 #### Foundations
 
@@ -38,7 +38,7 @@ How a diffusion LLM is built, trained, and sampled.
 
 ### Into Production
 
-What it takes to serve a diffusion LLM fast and cheaply.
+<!-- What it takes to serve a diffusion LLM fast and cheaply. -->
 
 #### Making one request fast
 
@@ -46,13 +46,14 @@ What it takes to serve a diffusion LLM fast and cheaply.
 | --- | --- | --- | --- |
 | P01 | [Caching without causality](https://buffett0323.github.io/blog/posts/kv-cache/) | Bidirectional attention breaks the KV cache. Mostly. | live |
 | P02 | [Parallel decoding](https://buffett0323.github.io/blog/posts/parallel-decoding/) | How many tokens can we commit in one step? | live |
+| P03 | [Keeping fewer tokens](https://buffett0323.github.io/blog/posts/sparse-kv/) | Most keys get almost no attention. Which ones can each head drop? | live |
 
 #### Serving many requests
 
 | # | Note | Hook | Status |
 | --- | --- | --- | --- |
-| P03 | [Batching denoising steps](https://buffett0323.github.io/blog/posts/batching/) | Every request is at a different noise level. Can they share a step? | live |
-| P04 | A serving engine for dLLMs | Scheduler, cache manager, sampler: what changes from an AR engine. | planned |
+| P04 | [Batching denoising steps](https://buffett0323.github.io/blog/posts/batching/) | Every request is at a different noise level. Can they share a step? | live |
+| P05 | A serving engine for dLLMs | Scheduler, cache manager, sampler: what changes from an AR engine. | planned |
 
 ## Paper notes
 
@@ -66,19 +67,21 @@ What it takes to serve a diffusion LLM fast and cheaply.
 | [TEAM](https://buffett0323.github.io/blog/papers/team/) | Expert activation in MoE dLLMs | on the PDF |
 | [dLLM-Serve](https://buffett0323.github.io/blog/papers/dllm-serve/) | Serving: logit memory, Refresh/Reuse scheduling, per-head sparse KV | on the PDF |
 
-## Writing
+<!-- ## Writing
 
 - **A note:** add `src/content/blog/<slug>.mdx`. If `<slug>` matches an entry in `src/series.ts`, the note is numbered and placed on the roadmap; otherwise it is listed under "Other notes". `draft: true` keeps it out of the build.
 - **A paper:** put the PDF in `public/pdfs/` and add `src/content/papers/<slug>.mdx`. Pin notes to the PDF with `<Annotation page={5} line={41} text="...">`, or mark text without a note with `<Highlight page={5} line={36} text="..." />` (the text may span lines); open the page with `?lines` in the URL to see line numbers. Omit `pdf` when the license does not allow reposting it; the notes are then shown as text.
-- **Demos** are Astro components in `src/components/`, one per figure.
+- **Demos** are Astro components in `src/components/`, one per figure. -->
 
 ## Running locally
 
 ```sh
-nvm use            # Node 22 (see .nvmrc)
 npm install
 npm run dev        # http://localhost:4321/blog/
-npm run build
 ```
 
-Push to `main` and GitHub Actions deploys to GitHub Pages. The site is served under `/blog`, so internal links use `withBase()` from `src/consts.ts`.
+Built with Astro, Svelte, and KaTeX. Written and drawn by [Buffett Liu](https://github.com/buffett0323).
+
+## Acknowledgements
+
+The site's framework is based on [learning-sglang](https://github.com/WilsonZheng0327/learning-sglang) by Wilson Zheng.

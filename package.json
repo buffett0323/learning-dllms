@@ -21,8 +21,8 @@
     "astro": "^7.3.5",
     "katex": "^0.18.9",
     "pdfjs-dist": "^6.4.299",
-    "rehype-katex": "^7.0.1",
-    "remark-math": "^6.0.0",
+    "rehype-katex": "^1.2.0",
+    "remark-math": "^3.0.1",
     "sharp": "^0.35.0"
   },
   "allowScripts": {

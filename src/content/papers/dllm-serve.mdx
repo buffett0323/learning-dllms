@@ -10,6 +10,7 @@ readDate: '2026-11-01'
 ---
 
 import Annotation from '../../components/Annotation.astro';
+import HeadSparsity from '../../components/HeadSparsity.astro';
 import Highlight from '../../components/Highlight.astro';
 import PhaseDiagram from '../../components/PhaseDiagram.astro';
 
@@ -21,9 +22,13 @@ Fast-dLLM, dKV-Cache and Sparse-dLLM speed up one request. dLLM-Serve asks what 
 
 Result: 1.61–1.81× throughput on RTX 4090 and 1.60–1.74× on L40S over the best baseline, with tail latency down almost 4× under heavy load.
 
-The two phases of §2.3, for one request (more, and how to batch them, in [P03](../../posts/batching/)):
+The two phases of §2.3, for one request (more, and how to batch them, in [P04](../../posts/batching/)):
 
 <PhaseDiagram caption="Rows are queries, columns are keys and values. Refresh runs every position and rewrites the cache; Reuse runs only the active block and reads the rest from the cache." />
+
+Sparse KV (§2.4, §3.3, §4.5): which context tokens each head keeps, and what that costs in memory (the concept in [P03](../../posts/sparse-kv/)).
+
+<HeadSparsity caption="Toy attention weights of the current block's queries over 12 context tokens, 4 heads. Head 4 looks at the brackets, which the other heads ignore. “Kept” is the share of each head's attention that lands on tokens it still has." />
 
 <Annotation page={1} line={41} text="monolithic logit computation tensor dominates GPU memory,">
 **The Memory Footprint Crisis.** The last layer turns each position into logits over the whole vocabulary. AR needs them only for the newest token, a $[B, 1, V]$ tensor. A dLLM predicts every position each step, so it materializes $[B, L, V]$. For LLaDA-8B with $B = 16$, $L = 2048$, $V = 126{,}464$ in FP16 that is $16 \cdot 2048 \cdot 126{,}464 \cdot 2$ bytes $\approx 8.3$ GB (p. 4), a third of a 4090.
@@ -62,5 +67,58 @@ dLLM-Serve keeps per-head selection and physically stores only the kept tokens, 
 <Highlight page={2} line={81} text="high-importance tokens." />
 
 <Annotation page={3} line={13} text="Refresh Phase. When transitioning between consecutive blocks" color="blue">
-Refresh fixes staleness: once a block is decoded, every cached K/V is out of date, so recompute all $L$. Reuse fixes cost: K/V outside the block barely change, so run only the block. Diagram at the top; costs and batching in [P03](../../posts/batching/).
+Refresh fixes staleness: once a block is decoded, every cached K/V is out of date, so recompute all $L$. Reuse fixes cost: K/V outside the block barely change, so run only the block. Diagram at the top; costs and batching in [P04](../../posts/batching/).
+</Annotation>
+
+<Annotation page={3} line={47} text="attention distribution is inherently sparse">
+**Sparse attention.** Each query's softmax weights over the keys sum to 1, but most of the weight lands on a few keys and the rest get almost none. Masks are the extreme case: every [MASK] has the same embedding, so they say little. Dropping the K/V of near-zero keys barely changes the output and saves memory and bandwidth.
+</Annotation>
+
+<Annotation page={3} line={56} text="Current methods such as Sparse-dLLM [18] enforce a single">
+**Sparse-dLLM** evicts context tokens from the KV cache. For every head $h$ and context token $j$ it scores how strongly the block's queries match $j$'s key (max-pooled over a small window, so neighbors of an important token survive too), then **sums over heads** (Eq. 5). That gives one importance score $S_j$ per token, and the top $k$ tokens are kept for **all** heads: one global sparsity pattern.
+</Annotation>
+
+<Annotation page={3} line={8} text="selects one shared top-k index set I from S">
+$\mathcal{I}$ is the list of positions kept: the $k$ indices $j$ with the largest $S_j$, with $k = rL$. Every head gathers $K[:, \mathcal{I}]$ and $V[:, \mathcal{I}]$, so all heads keep the same tokens, in the same slots. dLLM-Serve instead picks $\mathcal{I}_h$ per head (Eq. 6).
+</Annotation>
+
+<Annotation page={4} line={58} text="it implicitly optimizes for average relevance" color="pink">
+**Why the sum hurts.** Summing over heads ranks tokens by how much heads need them on average. A token that one head relies on (say, a matching bracket) but the other 31 ignore gets a low sum and is evicted, and that head loses its main input. In the demo at the top, head 4 keeps only a fraction of its attention under the shared set.
+
+The gain from sharing is layout: one index set, so every head's kept K/V sit at the same positions and one regular gather serves all heads. Measured cost (§6.4, Fig. 6): at $r = 10\%$, HumanEval drops to 7.9% pass@1 with the shared set vs 20.1% per head; GSM8K 40.0% vs 75.1%.
+</Annotation>
+
+<Annotation page={4} line={12} text="dInfer [15] Inference Framework Dynamic">
+The paper does not define "Dynamic" here, and the dInfer paper only reports batch size 1; its README says it "supports batched inference" without details. My reading: dInfer can batch several requests, unlike the static single-request setups, but it still schedules per request and does not track Refresh/Reuse phases, hence "Request-Level".
+</Annotation>
+
+<Annotation page={5} line={35} text="activation footprint of the output projection">
+**Footprint** = how much GPU memory something takes. GPU memory holds three things: the weights, the KV cache, and **activations**, the temporary tensors a forward pass creates and then frees. The **output projection** (LM head) is the last matrix multiply, hidden size $d$ → vocabulary $V$, which produces the logits. Its output, $N \times V$ for $N$ tokens, is by far the largest activation: $N = 16 \times 2048$ tokens gives 8.3 GB. The engine reserves memory for the largest activation at startup, so this one tensor sets the reservation.
+</Annotation>
+
+<Annotation page={6} line={5} text="Logit Decomposition. To break this dependency" color="green">
+**Logit Decomposition.** Decoding only needs, per token, the chosen token id and its confidence, not the full row of $V$ logits. So instead of one $[N, d] \times [d, V]$ multiply:
+
+1. take the next `max_num_logits` hidden states,
+2. compute their logits,
+3. argmax / sample, keep the ids and confidences,
+4. drop the logits tensor, and repeat.
+
+"Releasing the buffer" is just letting that tensor go out of scope; PyTorch's allocator then hands the same memory to the next chunk. Peak memory is chunk × $V$ instead of $N \times V$ (16× smaller for a 2048-token chunk of the 32,768 above). Same FLOPs, a few more kernel launches. Step through it in [P04](../../posts/batching/#the-logit-spike).
+</Annotation>
+
+<Highlight page={6} line={17} text="releases the temporary logit buffer before proceeding to" color="green" />
+
+<Annotation page={6} line={7} text="4.5 Head-Centric Sparse KV Cache Management">
+**Head-centric** = sparsity is chosen per attention head. Each head $h$ ranks context tokens by its own score $S_{h,j}$ (Eq. 6) and keeps its own top-$k$ set $\mathcal{I}_h$. All heads keep the same **number** of tokens, $k = rL$, but not the same tokens.
+</Annotation>
+
+<Annotation page={6} line={26} text="Decoupling Logical Sparsity from Physical Layout">
+**How the decoupling works.** *Logical* = which tokens a head keeps; *physical* = where their K/V sit in memory. At each Refresh, for every head, gather the K/V at $\mathcal{I}_h$ and copy them into slots $0 \dots k-1$ of a dense $[N_\text{heads}, rL, D_\text{head}]$ buffer, then throw the indices away. Rows hold different tokens but have the same length, so the buffer is a plain rectangle.
+
+This works because attention does not need the original positions: RoPE is applied to the keys before storing, so position is already inside each key, and softmax over a set of keys does not depend on their order. Reuse steps then run ordinary dense attention (FlashAttention) over each head's $k$ slots, with no index lookups. Compare SparseD: same per-head choice, but via masks over the full $[N_\text{heads}, L, D_\text{head}]$ cache, so no memory is saved.
+</Annotation>
+
+<Annotation page={6} line={41} text="the system pre-allocates a fixed block of rL">
+**Retention ratio $r$:** the fraction of a request's $L$ context tokens whose K/V each head keeps, so $k = rL$ and the cache is $r$ times the dense size. The experiments use $r = 0.5$ (Sparse-dLLM's default). Lower $r$ fits more requests in memory but loses accuracy, and per-head selection loses much less: on GSM8K its $r = 10\%$ matches the shared set at $r = 20\%$ (§6.4).
 </Annotation>

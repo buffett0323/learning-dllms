@@ -1,0 +1,392 @@
+---
+// Logit decomposition (after dLLM-Serve §4.3): compute the LM head's [N, V] logits in chunks of at most
+// max_num_logits tokens, keep only the token id and confidence per position, and free each chunk before the next.
+// Numbers: LLaDA-8B (V = 126,464, FP16 logits), 16 requests × 2048 tokens, L40S (48 GB) with 16 GB of weights,
+// about 1 GB of dense K/V per 2048-token request. Other activations and the guard band are left out.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const model = {
+	requests: 16,
+	tokens: 2048,
+	vocab: 126464,
+	gpu: 48,
+	weights: 16,
+	kvPerRequest: 1.07,
+	chunks: [32768, 8192, 2048],
+};
+---
+
+<figure class="lgc" data-lgc data-model={JSON.stringify(model)}>
+	<div class="lg-controls">
+		<div class="lg-seg" role="radiogroup" aria-label="max_num_logits">
+			<span class="lg-seg-lab">max_num_logits</span>
+			{
+				model.chunks.map((c, i) => (
+					<button type="button" role="radio" aria-checked={String(i === 0)} data-chunk={c}>
+						{i === 0 ? 'no cap' : c.toLocaleString('en-US')}
+					</button>
+				))
+			}
+		</div>
+		<div class="lg-buttons">
+			<button class="btn icon" type="button" data-act="reset" aria-label="Reset">↺</button>
+			<button class="btn icon" type="button" data-act="fwd" aria-label="Next chunk">›</button>
+			<button class="btn primary" type="button" data-act="play">Play</button>
+		</div>
+	</div>
+
+	<div class="lg-body">
+		<div>
+			<div class="lg-head" aria-hidden="true">
+				<span></span><span>hidden</span><span>logits, V = 126,464 per token</span><span>kept</span>
+			</div>
+			<div class="lg-rows" data-rows></div>
+		</div>
+		<div class="lg-side">
+			<p class="lg-h">Logits in memory</p>
+			<div class="lg-meter"><i data-now></i><b data-peak></b></div>
+			<p class="lg-num" data-mem></p>
+			<p class="lg-h">L40S, 48 GB, reserved at startup</p>
+			<div class="lg-gpu" data-gpu></div>
+			<p class="lg-num" data-kv></p>
+		</div>
+	</div>
+	<p class="lg-note" data-note></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	interface Model {
+		requests: number;
+		tokens: number;
+		vocab: number;
+		gpu: number;
+		weights: number;
+		kvPerRequest: number;
+		chunks: number[];
+	}
+	document.querySelectorAll<HTMLElement>('[data-lgc]').forEach((fig) => {
+		const M: Model = JSON.parse(fig.dataset.model!);
+		const N = M.requests * M.tokens;
+		const gb = (tokens: number) => (tokens * M.vocab * 2) / 1e9;
+		const fmt = (v: number) => `${v.toFixed(v < 1 ? 2 : 1)} GB`;
+		const rowsEl = fig.querySelector<HTMLElement>('[data-rows]')!;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+		// A deterministic "logit row" pattern per request, with one hot cell (the argmax).
+		const V_CELLS = 20;
+		const pattern = Array.from({ length: M.requests }, (_, i) =>
+			Array.from({ length: V_CELLS }, (_, j) => ((i * 7 + j * 13) % 17) / 17 / 2.5),
+		);
+		const hot = pattern.map((_, i) => (i * 5 + 3) % V_CELLS);
+		hot.forEach((j, i) => (pattern[i][j] = 1));
+
+		let chunk = M.chunks[0];
+		let at = 0;
+		let timer: number | undefined;
+		const rowsPer = () => chunk / M.tokens;
+		const nChunks = () => N / chunk;
+
+		function render() {
+			const n = nChunks();
+			const live = at >= 1 && at <= n ? at - 1 : -1;
+			const done = Math.min(at - 1, n) * rowsPer();
+			rowsEl.innerHTML = Array.from({ length: M.requests }, (_, i) => {
+				const c = Math.floor(i / rowsPer());
+				const state = c === live ? 'live' : i < done ? 'done' : 'wait';
+				const cells = pattern[i]
+					.map((w, j) => `<span class="v ${state === 'live' && j === hot[i] ? 'hot' : ''}" style="--w:${state === 'live' ? w : 0}"></span>`)
+					.join('');
+				return `<div class="lg-row ${state} ${i % rowsPer() === 0 && rowsPer() > 1 ? 'first' : ''}"><span class="lab">req ${i + 1}</span><span class="h"></span><span class="strip">${cells}</span><span class="out">${state === 'done' ? 'id, conf' : ''}</span></div>`;
+			}).join('');
+
+			const now = live >= 0 ? gb(chunk) : 0;
+			const peak = at === 0 ? 0 : gb(chunk);
+			fig.querySelector<HTMLElement>('[data-now]')!.style.width = `${(now / gb(N)) * 100}%`;
+			const peakEl = fig.querySelector<HTMLElement>('[data-peak]')!;
+			peakEl.style.left = `${(peak / gb(N)) * 100}%`;
+			peakEl.hidden = at === 0;
+			fig.querySelector<HTMLElement>('[data-mem]')!.innerHTML =
+				`now <b>${fmt(now)}</b> · peak <b>${fmt(peak)}</b> <span>(full tensor ${fmt(gb(N))})</span>`;
+
+			const reserve = gb(chunk);
+			const kv = M.gpu - M.weights - reserve;
+			const pct = (v: number) => `${(v / M.gpu) * 100}%`;
+			fig.querySelector<HTMLElement>('[data-gpu]')!.innerHTML =
+				`<span class="w" style="width:${pct(M.weights)}">weights</span><span class="r" style="width:${pct(reserve)}">${reserve > 1.5 ? 'logits' : ''}</span><span class="kv" style="width:${pct(kv)}">KV pool</span>`;
+			fig.querySelector<HTMLElement>('[data-kv]')!.innerHTML =
+				`logit reserve <b>${fmt(reserve)}</b> · KV pool <b>${fmt(kv)}</b> ≈ <b>${Math.floor(kv / M.kvPerRequest)}</b> requests of ${M.tokens.toLocaleString('en-US')} tokens`;
+
+			const size = `${chunk.toLocaleString('en-US')} × ${M.vocab.toLocaleString('en-US')}`;
+			note.innerHTML =
+				at === 0
+					? `Last layer done: ${N.toLocaleString('en-US')} hidden states (${M.requests} requests × ${M.tokens.toLocaleString('en-US')} tokens) wait for the LM head. ${n === 1 ? 'All at once, they produce one logits tensor.' : `max_num_logits = ${chunk.toLocaleString('en-US')}, so the LM head runs ${n} times.`}`
+					: live >= 0
+						? `${n === 1 ? 'One multiply' : `Chunk ${live + 1} of ${n}`}: ${size} logits (${fmt(gb(chunk))}). Argmax or sample each row, keep only the token id and its confidence (a few bytes per token).${live > 0 ? ' The previous chunk’s logits are already freed, and the allocator hands that same memory to this one, so the peak does not grow.' : ''}`
+						: `Done: every token has its id and confidence, and no logits are left. The peak was ${fmt(gb(chunk))}, so that is all the profiler reserves for them; the rest goes to the KV pool. Same FLOPs either way${n > 1 ? `, just ${n} smaller launches` : ''}.`;
+
+			fig.querySelector<HTMLButtonElement>('[data-act="fwd"]')!.disabled = at > n;
+			fig.querySelector<HTMLButtonElement>('[data-act="reset"]')!.disabled = at === 0;
+			playBtn.textContent = timer ? 'Pause' : 'Play';
+		}
+
+		function stop() {
+			clearInterval(timer);
+			timer = undefined;
+		}
+		playBtn.addEventListener('click', () => {
+			if (timer) return stop(), render();
+			if (at > nChunks()) at = 0;
+			timer = window.setInterval(() => {
+				at++;
+				if (at > nChunks()) stop();
+				render();
+			}, 650);
+			render();
+		});
+		fig.querySelector('[data-act="fwd"]')!.addEventListener('click', () => (stop(), (at = Math.min(nChunks() + 1, at + 1)), render()));
+		fig.querySelector('[data-act="reset"]')!.addEventListener('click', () => (stop(), (at = 0), render()));
+		fig.querySelectorAll<HTMLButtonElement>('[data-chunk]').forEach((b) =>
+			b.addEventListener('click', () => {
+				stop();
+				chunk = +b.dataset.chunk!;
+				at = 0;
+				fig.querySelectorAll('[data-chunk]').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+				render();
+			}),
+		);
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.lgc {
+		--c-run: #c2410c;
+		--c-cache: #2f6fb3;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .lgc {
+		--c-run: #e06a2c;
+		--c-cache: #4f8fd6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .lgc {
+			--c-run: #e06a2c;
+			--c-cache: #4f8fd6;
+		}
+	}
+	.lgc:not(.ready) {
+		display: none;
+	}
+	.lg-controls {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.75rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.lg-buttons {
+		display: flex;
+		gap: 0.5rem;
+	}
+	.lg-buttons .primary {
+		min-width: 5.5rem;
+	}
+	.lg-seg {
+		display: inline-flex;
+		flex-wrap: wrap;
+		padding: 3px;
+		gap: 2px;
+		border-radius: 8px;
+		background: var(--code-bg);
+	}
+	.lg-seg-lab {
+		align-self: center;
+		padding: 0 0.4rem;
+		font: 0.7rem var(--mono);
+		color: var(--muted);
+	}
+	.lg-seg button {
+		padding: 0.35rem 0.7rem;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		color: var(--muted);
+		font: 0.78rem var(--mono);
+		cursor: pointer;
+	}
+	.lg-seg button[aria-checked='true'] {
+		background: var(--surface);
+		color: var(--fg);
+		box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+	}
+	.lg-body {
+		display: grid;
+		grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+		gap: 1.5rem;
+		margin-top: 1rem;
+	}
+	.lg-head,
+	.lg-rows :global(.lg-row) {
+		display: grid;
+		grid-template-columns: 3.2rem 2.4rem minmax(0, 1fr) 3.6rem;
+		gap: 0.4rem;
+		align-items: center;
+	}
+	.lg-head {
+		margin-bottom: 0.3rem;
+		font-family: var(--mono);
+		font-size: 0.6rem;
+		color: var(--muted);
+	}
+	.lg-head span:last-child {
+		text-align: center;
+	}
+	.lg-rows {
+		display: grid;
+		gap: 2px;
+	}
+	.lg-rows :global(.lg-row.first:not(:first-child)) {
+		margin-top: 4px;
+	}
+	.lg-rows :global(.lab) {
+		font-family: var(--mono);
+		font-size: 0.62rem;
+		color: var(--muted);
+	}
+	.lg-rows :global(.h) {
+		height: 0.9rem;
+		border-radius: 2px;
+		background: color-mix(in srgb, var(--fg) 30%, var(--surface));
+		transition: opacity 0.25s;
+	}
+	.lg-rows :global(.done .h) {
+		opacity: 0.2;
+	}
+	.lg-rows :global(.strip) {
+		display: grid;
+		grid-template-columns: repeat(20, minmax(0, 1fr));
+		gap: 1px;
+		height: 0.9rem;
+		border-radius: 2px;
+		box-shadow: inset 0 0 0 1px var(--line);
+	}
+	.lg-rows :global(.live .strip) {
+		box-shadow: 0 0 0 1.5px var(--c-run);
+	}
+	.lg-rows :global(.v) {
+		background: color-mix(in srgb, var(--c-run) calc(var(--w) * 100%), transparent);
+		transition: background 0.25s;
+	}
+	.lg-rows :global(.v.hot) {
+		background: var(--c-run);
+	}
+	.lg-rows :global(.out) {
+		height: 0.9rem;
+		display: grid;
+		place-items: center;
+		border-radius: 2px;
+		font-family: var(--mono);
+		font-size: 0.55rem;
+	}
+	.lg-rows :global(.done .out) {
+		background: color-mix(in srgb, var(--c-cache) 22%, var(--surface));
+	}
+	.lg-h {
+		margin: 0 0 0.4rem;
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		color: var(--fg);
+	}
+	.lg-h:not(:first-child) {
+		margin-top: 1.2rem;
+	}
+	.lg-meter {
+		position: relative;
+		height: 1.1rem;
+		border-radius: 3px;
+		background: var(--code-bg);
+	}
+	.lg-meter i {
+		position: absolute;
+		inset: 0 auto 0 0;
+		border-radius: 3px;
+		background: var(--c-run);
+		transition: width 0.25s;
+	}
+	.lg-meter b {
+		position: absolute;
+		top: -3px;
+		bottom: -3px;
+		border-left: 2px dashed var(--fg);
+		transition: left 0.25s;
+	}
+	.lg-num {
+		margin: 0.4rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	.lg-num :global(b) {
+		color: var(--fg);
+	}
+	.lg-gpu {
+		display: flex;
+		height: 1.6rem;
+		overflow: hidden;
+		border-radius: 3px;
+		font-family: var(--mono);
+		font-size: 0.6rem;
+	}
+	.lg-gpu :global(span) {
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		white-space: nowrap;
+		transition: width 0.3s;
+	}
+	.lg-gpu :global(.w) {
+		background: color-mix(in srgb, var(--fg) 25%, var(--surface));
+	}
+	.lg-gpu :global(.r) {
+		background: color-mix(in srgb, var(--c-run) 55%, var(--surface));
+	}
+	.lg-gpu :global(.kv) {
+		background: color-mix(in srgb, var(--c-cache) 30%, var(--surface));
+	}
+	.lg-note {
+		margin: 1rem 0 0;
+		min-height: 4.5em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 760px) {
+		.lgc {
+			padding: 1rem;
+		}
+		.lg-body {
+			grid-template-columns: 1fr;
+		}
+		.lg-seg button {
+			font-size: 0.68rem;
+			padding: 0.3rem 0.5rem;
+		}
+	}
+</style>

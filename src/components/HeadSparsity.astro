@@ -1,0 +1,313 @@
+---
+// Sparse KV for dLLMs: which context tokens each attention head keeps, and how they are stored
+// (after dLLM-Serve §2.4, §3.3, §4.5). Toy attention weights; the window pooling of Eq. 5/6 is left out.
+// - Shared top-k (Sparse-dLLM): sum scores over heads, keep one index set I for every head.
+// - Per-head top-k (dLLM-Serve): each head keeps its own I_h, packed into a dense [heads, k] buffer.
+// - Mask only (SparseD-style): per-head choice, but the full KV stays in memory and is masked out.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const model = {
+	tokens: ['def', 'total', '(', 'xs', ')', ':', 'return', 'sum', '[M]', '[M]', '[M]', '[M]'],
+	// Attention of the current block's queries to each context token, one row per head (normalized in the script).
+	heads: [
+		[10, 30, 1, 25, 1, 3, 20, 6, 1, 1, 1, 1],
+		[30, 25, 2, 20, 2, 4, 10, 4, 1, 1, 1, 1],
+		[4, 15, 1, 35, 1, 10, 25, 6, 1, 1, 0.5, 0.5],
+		[2, 3, 45, 4, 35, 3, 2, 2, 1, 1, 1, 1],
+	],
+};
+---
+
+<figure class="hsp" data-hsp data-model={JSON.stringify(model)}>
+	<div class="hs-controls">
+		<div class="hs-seg" role="radiogroup" aria-label="Selection">
+			<button type="button" role="radio" aria-checked="true" data-mode="shared">Shared (Sparse-dLLM)</button>
+			<button type="button" role="radio" aria-checked="false" data-mode="mask">Per-head, masked (SparseD)</button>
+			<button type="button" role="radio" aria-checked="false" data-mode="head">Per-head, packed (dLLM-Serve)</button>
+		</div>
+		<div class="hs-seg" role="radiogroup" aria-label="Retention ratio">
+			<button type="button" role="radio" aria-checked="true" data-r="0.25">r = 25%</button>
+			<button type="button" role="radio" aria-checked="false" data-r="0.5">r = 50%</button>
+		</div>
+	</div>
+
+	<div class="hs-body">
+		<div>
+			<p class="hs-h">Which tokens each head keeps <span>(shade = attention weight)</span></p>
+			<div class="hs-grid" data-grid style={`--n:${model.tokens.length}`}></div>
+		</div>
+		<div>
+			<p class="hs-h">What is stored per head</p>
+			<div class="hs-store" data-store></div>
+		</div>
+	</div>
+	<p class="hs-note" data-note></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	type Mode = 'shared' | 'head' | 'mask';
+	document.querySelectorAll<HTMLElement>('[data-hsp]').forEach((fig) => {
+		const { tokens, heads: raw } = JSON.parse(fig.dataset.model!) as { tokens: string[]; heads: number[][] };
+		const L = tokens.length;
+		const H = raw.length;
+		const heads = raw.map((row) => {
+			const s = row.reduce((a, b) => a + b, 0);
+			return row.map((v) => v / s);
+		});
+		const grid = fig.querySelector<HTMLElement>('[data-grid]')!;
+		const store = fig.querySelector<HTMLElement>('[data-store]')!;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		let mode: Mode = 'shared';
+		let r = 0.25;
+		const pct = (v: number) => `${Math.round(v * 100)}%`;
+		const topk = (score: number[], k: number) =>
+			score
+				.map((v, j) => [v, j] as const)
+				.sort((a, b) => b[0] - a[0])
+				.slice(0, k)
+				.map(([, j]) => j)
+				.sort((a, b) => a - b);
+
+		function render() {
+			const k = Math.round(r * L);
+			const S = tokens.map((_, j) => heads.reduce((a, h) => a + h[j], 0));
+			const shared = topk(S, k);
+			const kept = heads.map((h) => (mode === 'shared' ? shared : topk(h, k)));
+			const mass = heads.map((h, i) => kept[i].reduce((a, j) => a + h[j], 0));
+
+			let html = `<span></span>${tokens.map((t) => `<span class="tok">${t}</span>`).join('')}<span class="mass-h">kept</span>`;
+			heads.forEach((h, i) => {
+				html += `<span class="lab">head ${i + 1}</span>`;
+				html += h.map((v, j) => `<span class="cell ${kept[i].includes(j) ? 'keep' : ''}" style="--w:${Math.min(1, v / 0.45)}" title="${pct(v)}"></span>`).join('');
+				html += `<span class="mass ${mass[i] < 0.5 ? 'low' : ''}">${pct(mass[i])}</span>`;
+			});
+			if (mode === 'shared') {
+				html += `<span class="lab sum">S (sum)</span>${S.map((v, j) => `<span class="cell sum ${shared.includes(j) ? 'keep' : ''}" style="--w:${Math.min(1, v / 1.1)}"></span>`).join('')}<span></span>`;
+			}
+			grid.innerHTML = html;
+
+			store.innerHTML = heads
+				.map((_, i) => {
+					const slots =
+						mode === 'mask'
+							? tokens.map((t, j) => `<span class="slot ${kept[i].includes(j) ? '' : 'dead'}">${t}</span>`).join('')
+							: kept[i].map((j) => `<span class="slot">${tokens[j]}</span>`).join('');
+					return `<div class="row"><span class="lab">head ${i + 1}</span><div class="slots" style="--s:${L}">${slots}</div></div>`;
+				})
+				.join('');
+			const used = mode === 'mask' ? L : k;
+			store.insertAdjacentHTML('beforeend', `<p class="mem">K/V slots per head: <b>${used}</b> of ${L}${mode === 'mask' ? ' (masked slots still stored and read)' : ` · k = r·L = ${k}`}</p>`);
+
+			const worst = mass.indexOf(Math.min(...mass));
+			note.innerHTML =
+				mode === 'shared'
+					? `Scores are summed over heads into one S, and the top ${k} positions form one set I = {${shared.map((j) => tokens[j]).join(', ')}} used by every head. Head ${worst + 1} attends mostly to tokens the others ignore, so its tokens lose the vote: it keeps only ${pct(mass[worst])} of its attention. Storage is regular, every head has the same positions.`
+					: mode === 'head'
+						? `Each head keeps its own top ${k}, so every head keeps at least ${pct(Math.min(...mass))} of its attention. The kept K/V are copied into a dense [heads × ${k}] buffer: different tokens per row, same shape, no gaps.`
+						: `Same choice per head, but done with an attention mask over the full cache: all ${L} K/V per head are still stored and read from memory, so nothing is saved.`;
+		}
+
+		fig.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) =>
+			b.addEventListener('click', () => {
+				mode = b.dataset.mode as Mode;
+				fig.querySelectorAll('[data-mode]').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+				render();
+			}),
+		);
+		fig.querySelectorAll<HTMLButtonElement>('[data-r]').forEach((b) =>
+			b.addEventListener('click', () => {
+				r = +b.dataset.r!;
+				fig.querySelectorAll('[data-r]').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+				render();
+			}),
+		);
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.hsp {
+		--c-run: #c2410c;
+		--c-cache: #2f6fb3;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .hsp {
+		--c-run: #e06a2c;
+		--c-cache: #4f8fd6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .hsp {
+			--c-run: #e06a2c;
+			--c-cache: #4f8fd6;
+		}
+	}
+	.hsp:not(.ready) {
+		display: none;
+	}
+	.hs-controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.hs-seg {
+		display: inline-flex;
+		flex-wrap: wrap;
+		padding: 3px;
+		gap: 2px;
+		border-radius: 8px;
+		background: var(--code-bg);
+	}
+	.hs-seg button {
+		padding: 0.35rem 0.7rem;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		color: var(--muted);
+		font: 0.78rem var(--mono);
+		cursor: pointer;
+	}
+	.hs-seg button[aria-checked='true'] {
+		background: var(--surface);
+		color: var(--fg);
+		box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+	}
+	.hs-body {
+		display: grid;
+		grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+		gap: 1.5rem;
+		margin-top: 1rem;
+	}
+	.hs-h {
+		margin: 0 0 0.5rem;
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		color: var(--fg);
+	}
+	.hs-h span {
+		color: var(--muted);
+	}
+	.hs-grid {
+		display: grid;
+		grid-template-columns: 3.4rem repeat(var(--n), minmax(0, 1fr)) 2.6rem;
+		gap: 2px;
+		align-items: center;
+	}
+	.hs-grid :global(.tok) {
+		height: 2.6rem;
+		writing-mode: vertical-rl;
+		transform: rotate(180deg);
+		font-family: var(--mono);
+		font-size: 0.6rem;
+		color: var(--muted);
+		text-align: left;
+	}
+	.hs-grid :global(.lab),
+	.hs-store :global(.lab) {
+		font-family: var(--mono);
+		font-size: 0.65rem;
+		color: var(--muted);
+	}
+	.hs-grid :global(.cell) {
+		aspect-ratio: 1;
+		border-radius: 3px;
+		background: color-mix(in srgb, var(--fg) calc(var(--w) * 70%), var(--surface));
+		opacity: 0.35;
+	}
+	.hs-grid :global(.cell.keep) {
+		opacity: 1;
+		box-shadow: 0 0 0 2px var(--c-run);
+	}
+	.hs-grid :global(.cell.sum) {
+		margin-top: 0.4rem;
+		background: color-mix(in srgb, var(--c-cache) calc(var(--w) * 80%), var(--surface));
+	}
+	.hs-grid :global(.lab.sum) {
+		margin-top: 0.4rem;
+	}
+	.hs-grid :global(.mass-h) {
+		align-self: end;
+		font-family: var(--mono);
+		font-size: 0.6rem;
+		color: var(--muted);
+		text-align: right;
+	}
+	.hs-grid :global(.mass) {
+		font-family: var(--mono);
+		font-size: 0.75rem;
+		text-align: right;
+	}
+	.hs-grid :global(.mass.low) {
+		color: var(--c-run);
+		font-weight: 600;
+	}
+	.hs-store {
+		display: grid;
+		gap: 4px;
+		padding-top: 2.6rem;
+	}
+	.hs-store :global(.row) {
+		display: grid;
+		grid-template-columns: 3.4rem minmax(0, 1fr);
+		align-items: center;
+	}
+	.hs-store :global(.slots) {
+		display: grid;
+		grid-template-columns: repeat(var(--s), minmax(0, 1fr));
+		gap: 2px;
+	}
+	.hs-store :global(.slot) {
+		height: 1.45rem;
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		border-radius: 3px;
+		background: color-mix(in srgb, var(--c-cache) 22%, var(--surface));
+		font-family: var(--mono);
+		font-size: 0.5rem;
+		white-space: nowrap;
+	}
+	.hs-store :global(.slot.dead) {
+		background: repeating-linear-gradient(-45deg, transparent 0 3px, rgb(0 0 0 / 0.12) 3px 4px);
+		color: var(--faint);
+	}
+	.hs-store :global(.mem) {
+		margin: 0.4rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		color: var(--muted);
+	}
+	.hs-store :global(.mem b) {
+		color: var(--fg);
+	}
+	.hs-note {
+		margin: 1rem 0 0;
+		min-height: 3em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 760px) {
+		.hs-body {
+			grid-template-columns: 1fr;
+		}
+		.hs-store {
+			padding-top: 0;
+		}
+	}
+</style>

@@ -5,6 +5,7 @@ description: 'With a KV cache, a dLLM alternates between two kinds of step, Refr
 pubDate: '2026-11-01'
 ---
 
+import LogitChunks from '../../components/LogitChunks.astro';
 import Note from '../../components/Note.astro';
 import PhaseDiagram from '../../components/PhaseDiagram.astro';
 import PhaseSchedule from '../../components/PhaseSchedule.astro';
@@ -51,10 +52,25 @@ Per phase finishes the same work in about half the iterations, because the Refre
 
 ## The logit spike
 
-A Refresh also predicts every position, so the last layer materializes logits of shape $[B, L, V]$. For 16 requests of 2048 tokens and LLaDA's 126,464-word vocabulary, that is $16 \cdot 2048 \cdot 126{,}464 \cdot 2$ bytes $\approx 8.3$ GB, for one instant. An engine must reserve memory for that peak, which leaves less for the KV cache and so fewer requests. dLLM-Serve computes logits in chunks of at most `max_num_logits` tokens, keeping the peak small and giving the rest to the KV pool.
+A Refresh also predicts every position, so the last layer, the LM head, turns every hidden state into a row of logits over the vocabulary: a $[B, L, V]$ tensor. For 16 requests of 2048 tokens and LLaDA's 126,464-word vocabulary, that is $16 \cdot 2048 \cdot 126{,}464 \cdot 2$ bytes $\approx 8.3$ GB, for one instant. An AR engine never sees this: it only needs logits for the newest token, $[B, 1, V]$.
+
+The tensor lives for one matrix multiply, but it still costs memory for good. At startup, a serving engine runs a dummy batch of the largest size it allows, measures the peak memory, and reserves that much for activations. Whatever is left after the weights and that reservation becomes the KV pool. So the 8.3 GB spike permanently takes 8.3 GB from the KV cache, and fewer requests fit.
+
+The fix, **logit decomposition**, uses the fact that decoding never needs the full logits. Per token it keeps two numbers: the chosen token id and its confidence. So dLLM-Serve sets a cap, `max_num_logits`, and runs the LM head in chunks:
+
+1. take the next `max_num_logits` hidden states,
+2. compute their logits,
+3. argmax or sample each row, keep the ids and confidences,
+4. drop the logits and move to the next chunk.
+
+Dropping is nothing special: the chunk's tensor goes out of scope, and PyTorch's allocator hands the same memory to the next chunk. The peak is one chunk, so that is all the engine reserves at startup.
+
+<LogitChunks caption="LLaDA-8B, 16 requests × 2048 tokens. Each row is one request's 2048 logit rows, shrunk to one strip; the hot cell is the argmax. Pick a chunk size and play: the peak follows the chunk, and the startup reservation with it. GPU split is a rough estimate that ignores other activations." />
+
+The FLOPs are the same either way; the cost is a few extra kernel launches. With 2048-token chunks, the logit reservation drops from 8.3 GB to 0.5 GB, room for about seven more 2048-token requests in the KV pool.
 
 <Note kind="question">
-	Per-phase scheduling assumes the engine knows each request's phase in advance. With an adaptive policy (Elastic-Cache) the next Refresh is decided at run time. How should the scheduler plan for it? P04.
+	Per-phase scheduling assumes the engine knows each request's phase in advance. With an adaptive policy (Elastic-Cache) the next Refresh is decided at run time. How should the scheduler plan for it? P05.
 </Note>
 
 ## References

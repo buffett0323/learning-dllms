@@ -58,6 +58,7 @@ export const tracks: Track[] = [
 				notes: [
 					{ slug: 'kv-cache', title: 'Caching without causality', hook: 'Bidirectional attention breaks the KV cache. Mostly.' },
 					{ slug: 'parallel-decoding', title: 'Parallel decoding', hook: 'How many tokens can we commit in one step?' },
+					{ slug: 'sparse-kv', title: 'Keeping fewer tokens', hook: 'Most keys get almost no attention. Which ones can each head drop?' },
 				],
 			},
 			{

@@ -1,0 +1,61 @@
+---
+title: 'Keeping fewer tokens'
+hook: 'Most keys get almost no attention. Which ones can each head drop?'
+description: 'Sparse KV caches for diffusion LLMs: why attention is sparse, how Sparse-dLLM picks the tokens to keep, why one shared set fails some heads, and how dLLM-Serve stores a per-head set without wasting memory.'
+pubDate: '2026-11-08'
+---
+
+import HeadSparsity from '../../components/HeadSparsity.astro';
+import Note from '../../components/Note.astro';
+
+The caches in P01 decide **when** to recompute keys and values (K/V). This note asks **which** K/V to keep at all. Every cached token costs memory at every layer: for LLaDA-8B, about 0.5 MB per token, so 1 GB for a 2048-token request. If most of those tokens barely matter, keeping them wastes memory and bandwidth, and on a shared GPU it also limits how many requests fit.
+
+## Attention is sparse
+
+Each attention **head** (one of the parallel attention computations in a layer, with its own $Q$, $K$, $V$ projections; LLaDA-8B has 32 per layer) gives every query a softmax over all keys. The weights sum to 1, but most of the weight lands on a few keys and the rest get almost none. Dropping a key with weight 0.001 changes the output by about 0.1% of that key's value.
+
+dLLMs make this stronger. The response starts as [MASK] tokens, and every [MASK] has the same embedding, so dozens of them say almost nothing that one would not.
+
+## Picking the keys
+
+Sparse-dLLM scores each context token $j$ by how strongly the current block's queries match its key, per head $h$, and max-pools the score over a small window so that a token's neighbors survive with it:
+
+$$
+S_{h,j} = \max_{m \in [j - w/2,\ j + w/2]} Q_{b,h} \cdot K_{m,h}^\top
+$$
+
+Then it keeps the top $k$ tokens and evicts the rest, with $k = rL$. The **retention ratio** $r$ is the fraction of the $L$ context tokens kept, so the cache shrinks to $r$ times its dense size. The scores are recomputed at every Refresh (P04), when all K/V are fresh anyway.
+
+## One set, or one per head
+
+Sparse-dLLM sums the scores over heads, $S_j = \sum_h S_{h,j}$, and keeps one top-$k$ set $\mathcal{I}$ for **all** heads. That ranks tokens by how much heads need them on average. A head that tracks something the others ignore, such as matching brackets, loses its tokens to the vote:
+
+<HeadSparsity caption="Toy attention weights of the current block's queries over 12 context tokens, 4 heads. “Kept” is the share of each head's attention that lands on tokens it still has. Switch between the three methods: the two per-head modes keep the same tokens and differ only in what is stored." />
+
+## Dropping for real
+
+Per-head selection keeps much more accuracy at the same $r$ (dLLM-Serve, §6.4). Still, a shared set has one advantage: every head keeps the same positions, so one gather serves all heads and the cache stays a regular $[\text{heads}, k, d]$ tensor. Per-head sets break that. There are two ways out:
+
+- **Mask** (SparseD): keep the full $[\text{heads}, L, d]$ cache and mask out each head's dropped tokens. Accuracy is fine, but **nothing is saved**: every slot is still stored and read.
+- **Pack** (dLLM-Serve): at each Refresh, copy each head's $k$ kept K/V into slots $0 \dots k-1$ of a dense $[\text{heads}, k, d]$ buffer, then forget the indices. Rows hold different tokens but have the same length.
+
+Packing works because attention does not need the original positions. RoPE is applied to keys before they are stored, so each key already carries its position, and softmax over a set of keys does not depend on their order. Reuse steps run ordinary dense attention over each head's $k$ slots ($k = rL$, and $r < 1$).
+
+| | Which tokens | Stored per head | Memory |
+|---|---|---|---|
+| Dense | all | $L$ | $1\times$ |
+| Shared top-$k$ (Sparse-dLLM) | same for every head | $k$ | $r\times$ |
+| Per-head mask (SparseD) | own set per head | $L$ | $1\times$ |
+| Per-head packed (dLLM-Serve) | own set per head | $k$ | $r\times$ |
+
+Since every request's cache is a fixed $r$ times its dense size, a serving engine also knows in advance how much memory each request will take.
+
+<Note kind="question">
+	Selection happens only at a Refresh. Between Refreshes a token's importance can change, and a dropped token cannot come back until the next one. How long can a block run on a stale selection?
+</Note>
+
+## References
+
+1. Song et al. *Sparse-dLLM: Accelerating Diffusion LLMs with Dynamic Cache Eviction*. 2025.
+2. Wang et al. *SparseD: Sparse Attention for Diffusion Language Models*. 2025.
+3. Fan et al. *Taming the Memory Footprint Crisis: System Design for Production Diffusion LLM Serving* (dLLM-Serve). 2025. [Notes](../../papers/dllm-serve/).

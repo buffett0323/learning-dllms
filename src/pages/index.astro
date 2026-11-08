@@ -22,13 +22,18 @@ const href = (slug: string) => withBase(`/posts/${slug}/`);
 			<MaskedTitle tokens={['Diffusion', ' LLMs', ',', ' un', 'masked', '.']} />
 			<InferenceHero />
 			<div class="hero-actions">
-				{
-					first && (
-						<a class="btn primary" href={href(first.slug)}>
-							Start reading →
-						</a>
-					)
-				}
+				<div class="hero-buttons">
+					{
+						first && (
+							<a class="btn primary" href={href(first.slug)}>
+								Start reading →
+							</a>
+						)
+					}
+					<a class="btn" href="https://github.com/buffett0323/blog" target="_blank" rel="noopener">
+						★ Star on GitHub
+					</a>
+				</div>
 				<div class="progress" aria-label={`${published.length} of ${series.length} notes published`}>
 					{
 						tracks.map((t) => (
@@ -167,6 +172,11 @@ const href = (slug: string) => withBase(`/posts/${slug}/`);
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 1.25rem 2rem;
+	}
+	.hero-buttons {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.6rem;
 	}
 	.progress {
 		display: inline-flex;
