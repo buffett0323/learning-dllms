@@ -3,7 +3,7 @@ export const site = {
 	description:
 		'Learning notes on diffusion language models: from the masked-diffusion objective to sampling, scaling, and fast inference.',
 	author: { name: 'Buffett Liu', url: 'https://buffett0323.github.io/' },
-	repo: 'https://github.com/buffett0323/blog',
+	repo: 'https://github.com/buffett0323/learning-dllms',
 };
 
 export const SITE_TITLE = site.name;

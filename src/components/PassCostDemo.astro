@@ -133,7 +133,7 @@ const presets = [
 		};
 		const mkAR = marker('ar');
 		const mkDiff = marker('diff');
-		const place = (g: SVGGElement, n: number, label: string, above: boolean) => {
+		const place = (g: SVGElement, n: number, label: string, above: boolean) => {
 			const cx = x(n);
 			const cy = y(passMs(n));
 			g.querySelector('circle')!.setAttribute('cx', String(cx));

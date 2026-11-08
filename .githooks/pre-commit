@@ -1,0 +1,4 @@
+#!/bin/sh
+# Type-check (.astro, .ts, content schemas), build (MDX syntax, imports), then check KaTeX.
+# Skip once with `git commit --no-verify`.
+npm run check --silent

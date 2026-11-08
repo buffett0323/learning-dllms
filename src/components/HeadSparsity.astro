@@ -52,7 +52,6 @@ const model = {
 	document.querySelectorAll<HTMLElement>('[data-hsp]').forEach((fig) => {
 		const { tokens, heads: raw } = JSON.parse(fig.dataset.model!) as { tokens: string[]; heads: number[][] };
 		const L = tokens.length;
-		const H = raw.length;
 		const heads = raw.map((row) => {
 			const s = row.reduce((a, b) => a + b, 0);
 			return row.map((v) => v / s);

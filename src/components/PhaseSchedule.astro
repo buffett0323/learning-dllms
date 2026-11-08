@@ -59,7 +59,7 @@ const config = {
 			for (let t = 0; reqs.some((r) => !r.done) && t < 100; t++) {
 				let sum = 0;
 				const ran = new Set<number>();
-				const running = reqs.map((r, i) => i).filter((i) => reqs[i].started && !reqs[i].done);
+				const running = reqs.map((_, i) => i).filter((i) => reqs[i].started && !reqs[i].done);
 				for (const i of running) {
 					const c = C.cost[C.phases[reqs[i].pos]];
 					// Per request: the reservation guarantees room. Per phase: run if it fits now.

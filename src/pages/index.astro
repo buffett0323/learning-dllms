@@ -2,7 +2,7 @@
 import InferenceHero from '../components/InferenceHero.astro';
 import MaskedTitle from '../components/MaskedTitle.astro';
 import PaperList from '../components/PaperList.astro';
-import { withBase } from '../consts';
+import { site, withBase } from '../consts';
 import Base from '../layouts/Base.astro';
 import { getSeries, publishedPapers, tracks } from '../series';
 
@@ -30,7 +30,7 @@ const href = (slug: string) => withBase(`/posts/${slug}/`);
 							</a>
 						)
 					}
-					<a class="btn" href="https://github.com/buffett0323/blog" target="_blank" rel="noopener">
+					<a class="btn" href={site.repo} target="_blank" rel="noopener">
 						★ Star on GitHub
 					</a>
 				</div>

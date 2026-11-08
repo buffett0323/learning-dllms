@@ -24,7 +24,7 @@ const model = {
 			<span class="lg-seg-lab">max_num_logits</span>
 			{
 				model.chunks.map((c, i) => (
-					<button type="button" role="radio" aria-checked={String(i === 0)} data-chunk={c}>
+					<button type="button" role="radio" aria-checked={i === 0 ? 'true' : 'false'} data-chunk={c}>
 						{i === 0 ? 'no cap' : c.toLocaleString('en-US')}
 					</button>
 				))
