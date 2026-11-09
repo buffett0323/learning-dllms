@@ -1,0 +1,404 @@
+---
+// dKV-Cache §3.3, step by step. Rows are denoising steps, columns are positions (prompt, then answer).
+// One answer token is decoded per step, in a fixed non-sequential order. Masked positions are always
+// recomputed; decoded positions are cached. A token's K/V jump on the first step it appears as a real
+// token, so caching it right away stores an unsettled value; dKV-Cache waits one step ("one-step delay").
+// Every N steps the cache is refreshed. Decode recomputes everything at a refresh; PD keeps the prompt.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const prompt = ['Capital', 'of', 'France', '?'];
+const answer = ['It', 'is', 'Paris', ',', 'the', 'capital', '.', '<eos>'];
+const order = [2, 7, 0, 5, 1, 6, 4, 3];
+---
+
+<figure class="dkv" data-dkv data-prompt={JSON.stringify(prompt)} data-answer={JSON.stringify(answer)} data-order={JSON.stringify(order)}>
+	<div class="dk-controls">
+		<div class="dk-opts">
+			<div class="dk-seg" role="radiogroup" aria-label="When a decoded token is cached">
+				<span class="dk-seg-lab">cache a decoded token</span>
+				<button type="button" role="radio" aria-checked="false" data-opt="delay" data-val="0">at once</button>
+				<button type="button" role="radio" aria-checked="true" data-opt="delay" data-val="1">one step late</button>
+			</div>
+			<div class="dk-seg" role="radiogroup" aria-label="Refresh">
+				<span class="dk-seg-lab">refresh</span>
+				<button type="button" role="radio" aria-checked="false" data-opt="refresh" data-val="0">never</button>
+				<button type="button" role="radio" aria-checked="true" data-opt="refresh" data-val="4">every 4 steps</button>
+			</div>
+			<div class="dk-seg" role="radiogroup" aria-label="Prompt at refresh">
+				<span class="dk-seg-lab">prompt at refresh</span>
+				<button type="button" role="radio" aria-checked="true" data-opt="pd" data-val="0">recompute (Decode)</button>
+				<button type="button" role="radio" aria-checked="false" data-opt="pd" data-val="1">keep (PD)</button>
+			</div>
+		</div>
+		<div class="dk-buttons">
+			<button class="btn icon" type="button" data-act="back" aria-label="Previous step">‹</button>
+			<button class="btn icon" type="button" data-act="fwd" aria-label="Next step">›</button>
+			<button class="btn primary" type="button" data-act="play">Play</button>
+		</div>
+	</div>
+
+	<div class="dk-scroll">
+		<div class="dk-grid" data-grid style={`--n:${prompt.length + answer.length}; --p:${prompt.length}`}></div>
+	</div>
+
+	<p class="dk-legend" aria-hidden="true">
+		<span><i class="sw mask"></i>[MASK], recomputed</span>
+		<span><i class="sw new"></i>just appeared: K/V jump, computed</span>
+		<span><i class="sw write"></i>computed, written to cache</span>
+		<span><i class="sw cached"></i>read from cache</span>
+		<span><i class="sw off"></i>read from cache, cached before it settled</span>
+	</p>
+	<p class="dk-note" data-note></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	type Cell = 'mask' | 'new' | 'write' | 'cached' | 'off';
+	document.querySelectorAll<HTMLElement>('[data-dkv]').forEach((fig) => {
+		const prompt: string[] = JSON.parse(fig.dataset.prompt!);
+		const answer: string[] = JSON.parse(fig.dataset.answer!);
+		const order: number[] = JSON.parse(fig.dataset.order!);
+		const P = prompt.length;
+		const n = P + answer.length;
+		const T = answer.length; // one token decoded per step
+		const grid = fig.querySelector<HTMLElement>('[data-grid]')!;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+		const opt = { delay: 1, refresh: 4, pd: 0 };
+		let shown = 1;
+		let timer: number | undefined;
+
+		// Simulate all T steps. cachedAt[i] = step the position's cached K/V was written; settled[i] = whether that write was settled.
+		function simulate() {
+			const rows: { cells: Cell[]; computed: number; refresh: boolean; fresh: number | null; promoted: number | null }[] = [];
+			const cached = new Map<number, boolean>(); // position -> cached value is settled
+			for (let t = 1; t <= T; t++) {
+				// Tokens decoded before step t are in the input; order[t-2] appears for the first time.
+				const decoded = new Set(order.slice(0, t - 1).map((a) => P + a));
+				const fresh = t >= 2 ? P + order[t - 2] : null;
+				const prevFresh = t >= 3 ? P + order[t - 3] : null;
+				const refresh = t === 1 || (opt.refresh > 0 && (t - 1) % opt.refresh === 0);
+				const cells: Cell[] = [];
+				let promoted: number | null = null;
+				for (let i = 0; i < n; i++) {
+					const isPrompt = i < P;
+					let c: Cell;
+					if (!isPrompt && !decoded.has(i)) c = 'mask';
+					else if (refresh) {
+						if (isPrompt && opt.pd && t > 1) c = cached.has(i) ? 'cached' : 'write';
+						else if (i === fresh) {
+							// A refresh recomputes it, but it only just appeared; it is cacheable only without the delay.
+							if (opt.delay) c = 'new';
+							else ((c = 'write'), cached.set(i, false));
+						} else ((c = 'write'), cached.set(i, true));
+					} else if (i === fresh) {
+						if (opt.delay) c = 'new';
+						else ((c = 'write'), cached.set(i, false));
+					} else if (opt.delay && i === prevFresh && !cached.has(i)) {
+						c = 'write';
+						cached.set(i, true);
+						promoted = i;
+					} else c = cached.get(i) === false ? 'off' : 'cached';
+					cells.push(c);
+				}
+				rows.push({ cells, computed: cells.filter((c) => c !== 'cached' && c !== 'off').length, refresh, fresh, promoted });
+			}
+			return rows;
+		}
+
+		const word = (i: number) => (i < P ? prompt[i] : answer[i - P]);
+
+		function render() {
+			const rows = simulate();
+			const head =
+				`<span class="dk-corner">step</span>` +
+				Array.from({ length: n }, (_, i) => `<span class="dk-col ${i < P ? 'p' : ''}">${i < P ? `p${i + 1}` : `a${i - P + 1}`}</span>`).join('') +
+				`<span class="dk-corner r">run</span>`;
+			const body = rows
+				.slice(0, shown)
+				.map((r, k) => {
+					const t = k + 1;
+					const decoded = new Set(order.slice(0, t - 1).map((a) => P + a));
+					const cells = r.cells
+						.map((c, i) => {
+							const txt = i < P || decoded.has(i) ? word(i).replace('<', '&lt;').replace('>', '&gt;') : 'M';
+							return `<span class="dk-cell ${c}" title="${c}">${txt}</span>`;
+						})
+						.join('');
+					return `<span class="dk-step ${r.refresh ? 'refresh' : ''} ${t === shown ? 'cur' : ''}">${t}${r.refresh && t > 1 ? ' ⟳' : ''}</span>${cells}<span class="dk-count">${r.computed}/${n}</span>`;
+				})
+				.join('');
+			grid.innerHTML = head + body;
+
+			const r = rows[shown - 1];
+			const total = rows.slice(0, shown).reduce((s, x) => s + x.computed, 0);
+			const offCount = r.cells.filter((c) => c === 'off').length;
+			let text: string;
+			if (shown === 1) text = `Step 1: everything is masked except the prompt, so every position runs. The prompt's K/V are written to the cache.`;
+			else {
+				const f = r.fresh!;
+				const parts: string[] = [];
+				if (r.refresh) parts.push(`Refresh (every ${opt.refresh} steps): the cache is dropped and rebuilt${opt.pd ? ', except the prompt, which PD keeps' : ''}.`);
+				parts.push(
+					opt.delay
+						? `“${word(f)}” was decoded last step and appears as a real token for the first time. Its K/V jump now, so it is computed but <b>not cached yet</b>.`
+						: `“${word(f)}” was decoded last step and appears as a real token for the first time. Its K/V jump now, and it is <b>cached right away</b>, before the value settles.`,
+				);
+				if (r.promoted !== null) parts.push(`“${word(r.promoted)}” is computed once more, now settled, and written to the cache.`);
+				if (offCount) parts.push(`${offCount} position${offCount > 1 ? 's' : ''} read a value cached before it settled. Without the delay, this is what collapses accuracy at high cache ratios (Fig. 3).`);
+				parts.push(`Masks are always recomputed.`);
+				text = `Step ${shown}: ` + parts.join(' ');
+			}
+			note.innerHTML = `${text} <span class="dk-total">Total so far: ${total} of ${shown * n} position-passes computed.</span>`;
+			fig.querySelector<HTMLButtonElement>('[data-act="back"]')!.disabled = shown <= 1;
+			fig.querySelector<HTMLButtonElement>('[data-act="fwd"]')!.disabled = shown >= T;
+			playBtn.textContent = timer ? 'Pause' : shown >= T ? 'Replay' : 'Play';
+		}
+
+		function stop() {
+			clearInterval(timer);
+			timer = undefined;
+		}
+		playBtn.addEventListener('click', () => {
+			if (timer) return stop(), render();
+			if (shown >= T) shown = 1;
+			timer = window.setInterval(() => {
+				shown++;
+				if (shown >= T) stop();
+				render();
+			}, 1100);
+			render();
+		});
+		fig.querySelector('[data-act="fwd"]')!.addEventListener('click', () => (stop(), (shown = Math.min(T, shown + 1)), render()));
+		fig.querySelector('[data-act="back"]')!.addEventListener('click', () => (stop(), (shown = Math.max(1, shown - 1)), render()));
+		fig.querySelectorAll<HTMLButtonElement>('[data-opt]').forEach((b) =>
+			b.addEventListener('click', () => {
+				const k = b.dataset.opt as keyof typeof opt;
+				opt[k] = Number(b.dataset.val);
+				fig.querySelectorAll(`[data-opt="${k}"]`).forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+				render();
+			}),
+		);
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.dkv {
+		--c-mask: #c9c9c9;
+		--c-run: #e9a77a;
+		--c-cache: #8cbd6c;
+		--c-new: #f7da86;
+		--c-bad: #c0392b;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .dkv {
+		--c-mask: #555;
+		--c-run: #9a5f37;
+		--c-cache: #4f7a3c;
+		--c-new: #8a7426;
+		--c-bad: #ef6b5b;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .dkv {
+			--c-mask: #555;
+			--c-run: #9a5f37;
+			--c-cache: #4f7a3c;
+			--c-new: #8a7426;
+			--c-bad: #ef6b5b;
+		}
+	}
+	.dkv:not(.ready) {
+		display: none;
+	}
+	.dk-controls {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 0.75rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.dk-opts {
+		display: grid;
+		gap: 0.4rem;
+	}
+	.dk-buttons {
+		display: flex;
+		gap: 0.5rem;
+	}
+	.dk-buttons .primary {
+		min-width: 5.5rem;
+	}
+	.dk-seg {
+		display: inline-flex;
+		flex-wrap: wrap;
+		width: fit-content;
+		padding: 3px;
+		gap: 2px;
+		border-radius: 8px;
+		background: var(--code-bg);
+	}
+	.dk-seg-lab {
+		align-self: center;
+		min-width: 9.5rem;
+		padding: 0 0.4rem;
+		font: 0.7rem var(--mono);
+		color: var(--muted);
+	}
+	.dk-seg button {
+		padding: 0.3rem 0.6rem;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		color: var(--muted);
+		font: 0.74rem var(--mono);
+		cursor: pointer;
+	}
+	.dk-seg button[aria-checked='true'] {
+		background: var(--surface);
+		color: var(--fg);
+		box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+	}
+	.dk-scroll {
+		overflow-x: auto;
+		margin-top: 1rem;
+	}
+	.dk-grid {
+		display: grid;
+		grid-template-columns: 2.2rem repeat(var(--n), minmax(2.6rem, 1fr)) 3.2rem;
+		gap: 3px;
+		min-width: 38rem;
+		font-family: var(--mono);
+	}
+	.dk-grid :global(.dk-corner),
+	.dk-grid :global(.dk-col) {
+		font-size: 0.6rem;
+		color: var(--muted);
+		text-align: center;
+	}
+	.dk-grid :global(.dk-col.p) {
+		color: var(--fg);
+	}
+	.dk-grid :global(.dk-step) {
+		display: grid;
+		place-items: center;
+		font-size: 0.68rem;
+		color: var(--muted);
+		border-radius: 4px;
+	}
+	.dk-grid :global(.dk-step.cur) {
+		color: var(--fg);
+		font-weight: 600;
+		box-shadow: inset 0 0 0 1.5px var(--fg);
+	}
+	.dk-grid :global(.dk-step.refresh) {
+		color: var(--c-bad);
+	}
+	.dk-grid :global(.dk-cell) {
+		display: grid;
+		place-items: center;
+		height: 1.6rem;
+		overflow: hidden;
+		border-radius: 4px;
+		font-size: 0.56rem;
+		color: var(--fg);
+		white-space: nowrap;
+		border: 1px solid rgb(127 127 127 / 0.3);
+	}
+	.dk-grid :global(.dk-cell.mask) {
+		background: var(--c-mask);
+		color: var(--muted);
+	}
+	.dk-grid :global(.dk-cell.new) {
+		background: var(--c-run);
+		box-shadow: inset 0 0 0 2px var(--c-new);
+	}
+	.dk-grid :global(.dk-cell.write) {
+		background: var(--c-run);
+		box-shadow: inset 0 -4px 0 var(--c-cache);
+	}
+	.dk-grid :global(.dk-cell.cached) {
+		background: var(--c-cache);
+	}
+	.dk-grid :global(.dk-cell.off) {
+		background: repeating-linear-gradient(135deg, var(--c-cache) 0 4px, color-mix(in srgb, var(--c-bad) 55%, var(--c-cache)) 4px 8px);
+	}
+	.dk-grid :global(.dk-count) {
+		display: grid;
+		place-items: center;
+		font-size: 0.66rem;
+		color: var(--muted);
+	}
+	.dk-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1rem;
+		margin: 0.9rem 0 0;
+		font: 0.68rem var(--mono);
+		color: var(--muted);
+	}
+	.dk-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.sw {
+		display: inline-block;
+		width: 0.9rem;
+		height: 0.9rem;
+		border-radius: 3px;
+		border: 1px solid rgb(127 127 127 / 0.3);
+	}
+	.sw.mask {
+		background: var(--c-mask);
+	}
+	.sw.new {
+		background: var(--c-run);
+		box-shadow: inset 0 0 0 2px var(--c-new);
+	}
+	.sw.write {
+		background: var(--c-run);
+		box-shadow: inset 0 -3px 0 var(--c-cache);
+	}
+	.sw.cached {
+		background: var(--c-cache);
+	}
+	.sw.off {
+		background: repeating-linear-gradient(135deg, var(--c-cache) 0 3px, color-mix(in srgb, var(--c-bad) 55%, var(--c-cache)) 3px 6px);
+	}
+	.dk-note {
+		margin: 1rem 0 0;
+		min-height: 4.5em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	.dk-note :global(b) {
+		color: var(--fg);
+	}
+	.dk-note :global(.dk-total) {
+		display: block;
+		margin-top: 0.3rem;
+		font: 0.72rem var(--mono);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 760px) {
+		.dkv {
+			padding: 1rem;
+		}
+	}
+</style>

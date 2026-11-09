@@ -11,8 +11,14 @@ readDate: '2026-10-25'
 ---
 
 import Annotation from '../../components/Annotation.astro';
+import DKVCacheDemo from '../../components/DKVCacheDemo.astro';
+import Highlight from '../../components/Highlight.astro';
 
 A KV cache for masked diffusion that does not need semi-autoregressive blocks. The observation: a token's keys and values jump when it goes from `[MASK]` to decoded, then barely move. So cache decoded tokens only, one step after they are decoded, keep recomputing the masked ones, and refresh everything every few steps.
+
+§3.3 step by step: one answer token is decoded per step, in a non-sequential order. Switch the options to compare caching at once against one step late, and Decode against PD.
+
+<DKVCacheDemo caption="Toy example: 4 prompt tokens, 8 answer positions, one token decoded per step. Rows are steps, columns are positions. A token decoded at step t appears in the input at step t+1, where its K/V jump. dKV-Cache-Decode computes it once more at step t+2 and caches that settled value. Refresh rows (⟳) rebuild the cache." />
 
 <Annotation page={2} line={9} text="KV-Cache hinges on the assumption">
 Reason 1 for why AR caching fails: bidirectional attention, so earlier keys and values are not fixed.
@@ -22,12 +28,14 @@ Reason 1 for why AR caching fails: bidirectional attention, so earlier keys and 
 Reason 2, often missed: the AR cache also assumes you know *which* position comes next. A dLLM only learns that after the forward pass.
 </Annotation>
 
-<Annotation page={5} line={32} text="Once a token is decoded" color="green">
-The key observation. Masked tokens keep drifting; decoded tokens settle. Hence: cache only decoded tokens.
+<Highlight page={5} line={31} text="Despite step-to-step differences, the key and value embeddings, K and V , exhibit consistently high similarity across timesteps" color="green" />
+
+<Annotation page={5} line={32} text="Once a token is decoded, its representation becomes relatively stable in subsequent steps, whereas the representations of still-masked tokens continue to fluctuate significantly." color="green">
+Finding (2), the key observation. Masked tokens keep drifting; decoded tokens settle. Hence: cache only decoded tokens.
 </Annotation>
 
-<Annotation page={5} line={36} text="occur at the decoding step">
-…but the biggest jump is *at* the decoding step itself, so caching immediately would store the pre-jump value.
+<Annotation page={5} line={35} text="The most substantial changes in K and V occur at the decoding step of each token" color="green">
+Finding (3): …but the biggest jump is *at* the decoding step itself, so caching immediately would store the pre-jump value.
 </Annotation>
 
 <Annotation page={6} line={5} text="One-step Delayed Caching" color="pink">
