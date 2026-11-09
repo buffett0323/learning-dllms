@@ -1,0 +1,393 @@
+---
+// AR vs dLLM KV cache over two consecutive steps, drawn after dKV-Cache's Fig. 1.
+// Each column is one position; rows from the bottom: input token, Q, V, K, prediction.
+// AR: old K/V are reused (green), only the newest position is computed. dLLM: one mask is
+// replaced by a decoded token, every position attends to it, so every K/V is recomputed.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+
+type Tok = { t: string; kind: 'prompt' | 'decoded' | 'mask' };
+type Col = { tok: Tok; q: boolean; kv: 'cached' | 'computed'; out?: { t: string; kind: 'decoded' | 'pending' } };
+type Step = { label: string; cols: Col[]; note: string };
+type Panel = { id: string; title: string; sub: string; link: 'cache' | 'stale'; steps: Step[] };
+
+const p = (t: string): Tok => ({ t, kind: 'prompt' });
+const d = (t: string): Tok => ({ t, kind: 'decoded' });
+const m: Tok = { t: '', kind: 'mask' };
+
+const panels: Panel[] = [
+	{
+		id: 'ar',
+		title: '(a) AR',
+		sub: 'causal attention',
+		link: 'cache',
+		steps: [
+			{
+				label: 'step t',
+				note: 'K/V computed: 1 position',
+				cols: [
+					{ tok: p('The'), q: false, kv: 'cached' },
+					{ tok: p('cat'), q: false, kv: 'cached' },
+					{ tok: d('sat'), q: true, kv: 'computed', out: { t: 'down', kind: 'decoded' } },
+				],
+			},
+			{
+				label: 'step t+1',
+				note: 'K/V computed: 1 position',
+				cols: [
+					{ tok: p('The'), q: false, kv: 'cached' },
+					{ tok: p('cat'), q: false, kv: 'cached' },
+					{ tok: d('sat'), q: false, kv: 'cached' },
+					{ tok: d('down'), q: true, kv: 'computed', out: { t: '.', kind: 'decoded' } },
+				],
+			},
+		],
+	},
+	{
+		id: 'dllm',
+		title: '(b) dLLM',
+		sub: 'bidirectional attention',
+		link: 'stale',
+		steps: [
+			{
+				label: 'step t',
+				note: 'K/V computed: all 5 positions',
+				cols: [
+					{ tok: p('The'), q: true, kv: 'computed' },
+					{ tok: p('cat'), q: true, kv: 'computed' },
+					{ tok: m, q: true, kv: 'computed', out: { t: 'sat', kind: 'decoded' } },
+					{ tok: m, q: true, kv: 'computed', out: { t: '', kind: 'pending' } },
+					{ tok: m, q: true, kv: 'computed', out: { t: '', kind: 'pending' } },
+				],
+			},
+			{
+				label: 'step t+1',
+				note: 'K/V computed: all 5 positions, again',
+				cols: [
+					{ tok: p('The'), q: true, kv: 'computed' },
+					{ tok: p('cat'), q: true, kv: 'computed' },
+					{ tok: d('sat'), q: true, kv: 'computed' },
+					{ tok: m, q: true, kv: 'computed', out: { t: 'down', kind: 'decoded' } },
+					{ tok: m, q: true, kv: 'computed', out: { t: '', kind: 'pending' } },
+				],
+			},
+		],
+	},
+];
+
+// Geometry, in SVG units.
+const BW = 38;
+const BH = 26;
+const COL = BW + 6;
+const SLOTS = 5;
+const X0 = 30;
+const GAP = 58;
+const subX = (s: number) => X0 + s * (SLOTS * COL + GAP);
+const W = subX(1) + SLOTS * COL;
+const Y = { out: 6, k: 62, v: 94, q: 140, tok: 186, label: 232, note: 248 };
+const H = 258;
+const colX = (s: number, i: number) => subX(s) + i * COL;
+const linkX0 = subX(0) + SLOTS * COL - 2;
+const linkX1 = subX(1) - 6;
+const linkY = Y.v + 2;
+---
+
+<figure class="kvc">
+	<div class="kvc-panels">
+		{
+			panels.map((panel) => (
+				<section class="kvc-panel">
+					<p class="kvc-title">
+						<b>{panel.title}</b> <span>{panel.sub}</span>
+					</p>
+					<svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${panel.title}: ${panel.steps.map((s) => `${s.label}, ${s.note}`).join('; ')}`}>
+						<defs>
+							<marker id={`kvc-up-${panel.id}`} viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+								<path d="M0,0 L10,5 L0,10 z" class="kvc-head" />
+							</marker>
+							<marker id={`kvc-link-${panel.id}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+								<path d="M0,0 L10,5 L0,10 z" class={`kvc-head ${panel.link}`} />
+							</marker>
+						</defs>
+						<text class="kvc-row" x={X0 - 8} y={Y.k + BH / 2 + 4} text-anchor="end">K</text>
+						<text class="kvc-row" x={X0 - 8} y={Y.v + BH / 2 + 4} text-anchor="end">V</text>
+						<text class="kvc-row" x={X0 - 8} y={Y.q + BH / 2 + 4} text-anchor="end">Q</text>
+						{panel.steps.map((step, s) => (
+							<g>
+								<rect class="kvc-group" x={subX(s) - 4} y={Y.k - 4} width={SLOTS * COL + 2} height={Y.v + BH - Y.k + 8} rx="6" />
+								{step.cols.map((c, i) => {
+									const x = colX(s, i);
+									return (
+										<g>
+											{c.out && (
+												<>
+													<rect class={`kvc-box out ${c.out.kind}`} x={x} y={Y.out} width={BW} height={BH} rx="5" />
+													<text class="kvc-txt" x={x + BW / 2} y={Y.out + BH / 2 + 4}>
+														{c.out.t}
+													</text>
+													<line class="kvc-arrow" x1={x + BW / 2} x2={x + BW / 2} y1={Y.k - 6} y2={Y.out + BH + 5} marker-end={`url(#kvc-up-${panel.id})`} />
+												</>
+											)}
+											<rect class={`kvc-box k ${c.kv}`} x={x} y={Y.k} width={BW} height={BH} rx="5" />
+											<rect class={`kvc-box v ${c.kv}`} x={x} y={Y.v} width={BW} height={BH} rx="5" />
+											{c.q && <rect class="kvc-box q" x={x} y={Y.q} width={BW} height={BH} rx="5" />}
+											{c.kv === 'computed' && (
+												<line class="kvc-arrow" x1={x + BW / 2} x2={x + BW / 2} y1={Y.tok - 2} y2={Y.q + BH + 5} marker-end={`url(#kvc-up-${panel.id})`} />
+											)}
+											<rect class={`kvc-box tok ${c.tok.kind}`} x={x} y={Y.tok} width={BW} height={BH} rx="5" />
+											<text class="kvc-txt" x={x + BW / 2} y={Y.tok + BH / 2 + 4}>
+												{c.tok.kind === 'mask' ? 'M' : c.tok.t}
+											</text>
+										</g>
+									);
+								})}
+								<text class="kvc-step" x={subX(s) + (SLOTS * COL) / 2 - 3} y={Y.label}>
+									{step.label}
+								</text>
+								<text class={`kvc-count ${panel.link}`} x={subX(s) + (SLOTS * COL) / 2 - 3} y={Y.note}>
+									{step.note}
+								</text>
+							</g>
+						))}
+						<line class={`kvc-link ${panel.link}`} x1={linkX0} x2={linkX1} y1={linkY} y2={linkY} marker-end={`url(#kvc-link-${panel.id})`} />
+						<text class={`kvc-link-lab ${panel.link}`} x={(linkX0 + linkX1) / 2} y={linkY - 8}>
+							{panel.link === 'cache' ? 'reuse' : 'stale'}
+						</text>
+						{panel.link === 'stale' && (
+							<path class="kvc-x" d={`M${(linkX0 + linkX1) / 2 - 6},${linkY - 6} l12,12 M${(linkX0 + linkX1) / 2 + 6},${linkY - 6} l-12,12`} />
+						)}
+					</svg>
+				</section>
+			))
+		}
+	</div>
+	<p class="kvc-legend" aria-hidden="true">
+		<span><i class="sw k computed"></i><i class="sw v computed"></i>K/V computed</span>
+		<span><i class="sw k cached"></i><i class="sw v cached"></i>K/V reused from cache</span>
+		<span><i class="sw q"></i>Q computed</span>
+		<span><i class="sw mask"></i>[MASK]</span>
+		<span><i class="sw decoded"></i>decoded token</span>
+	</p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+	.kvc {
+		--k-new: #f7e2d4;
+		--v-new: #e9a77a;
+		--k-old: #d6e9cf;
+		--v-old: #8cbd6c;
+		--q: #b7d2ee;
+		--mask: #c9c9c9;
+		--dec: #f7da86;
+		--box-line: rgb(0 0 0 / 0.28);
+		--bad: #c0392b;
+		--good: #4a8f35;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .kvc {
+		--k-new: #5a4335;
+		--v-new: #9a5f37;
+		--k-old: #3a5133;
+		--v-old: #4f7a3c;
+		--q: #34557a;
+		--mask: #555;
+		--dec: #8a7426;
+		--box-line: rgb(255 255 255 / 0.22);
+		--bad: #ef6b5b;
+		--good: #7cc463;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .kvc {
+			--k-new: #5a4335;
+			--v-new: #9a5f37;
+			--k-old: #3a5133;
+			--v-old: #4f7a3c;
+			--q: #34557a;
+			--mask: #555;
+			--dec: #8a7426;
+			--box-line: rgb(255 255 255 / 0.22);
+			--bad: #ef6b5b;
+			--good: #7cc463;
+		}
+	}
+	.kvc-panels {
+		display: grid;
+		gap: 1rem;
+	}
+	.kvc-panel {
+		padding: 0.75rem;
+		border: 1px dashed var(--line);
+		border-radius: var(--radius);
+	}
+	.kvc-title {
+		margin: 0 0 0.4rem;
+		font-size: 0.9rem;
+	}
+	.kvc-title span {
+		font: 0.7rem var(--mono);
+		color: var(--muted);
+	}
+	svg {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+	.kvc-box {
+		stroke: var(--box-line);
+		stroke-width: 1;
+	}
+	.kvc-box.k.computed {
+		fill: var(--k-new);
+	}
+	.kvc-box.v.computed {
+		fill: var(--v-new);
+	}
+	.kvc-box.k.cached {
+		fill: var(--k-old);
+	}
+	.kvc-box.v.cached {
+		fill: var(--v-old);
+	}
+	.kvc-box.q {
+		fill: var(--q);
+	}
+	.kvc-box.tok.prompt {
+		fill: var(--surface);
+	}
+	.kvc-box.tok.mask {
+		fill: var(--mask);
+	}
+	.kvc-box.decoded {
+		fill: var(--dec);
+	}
+	.kvc-box.out.pending {
+		fill: none;
+		stroke-dasharray: 3 3;
+	}
+	.kvc-group {
+		fill: none;
+		stroke: var(--muted);
+		stroke-width: 1;
+		stroke-dasharray: 4 3;
+		opacity: 0.6;
+	}
+	.kvc-txt {
+		font: 10px var(--mono);
+		fill: var(--fg);
+		text-anchor: middle;
+	}
+	.kvc-row {
+		font: italic 13px var(--serif, serif);
+		fill: var(--fg);
+	}
+	.kvc-arrow {
+		stroke: var(--muted);
+		stroke-width: 1.2;
+	}
+	.kvc-head {
+		fill: var(--muted);
+	}
+	.kvc-head.cache {
+		fill: var(--good);
+	}
+	.kvc-head.stale {
+		fill: var(--bad);
+	}
+	.kvc-step {
+		font: 11px var(--mono);
+		fill: var(--fg);
+		text-anchor: middle;
+	}
+	.kvc-count {
+		font: 9.5px var(--mono);
+		fill: var(--muted);
+		text-anchor: middle;
+	}
+	.kvc-link {
+		stroke-width: 1.8;
+	}
+	.kvc-link.cache {
+		stroke: var(--good);
+	}
+	.kvc-link.stale {
+		stroke: var(--bad);
+		stroke-dasharray: 4 3;
+	}
+	.kvc-link-lab {
+		font: 10px var(--mono);
+		text-anchor: middle;
+	}
+	.kvc-link-lab.cache {
+		fill: var(--good);
+	}
+	.kvc-link-lab.stale {
+		fill: var(--bad);
+	}
+	.kvc-x {
+		stroke: var(--bad);
+		stroke-width: 2.2;
+		stroke-linecap: round;
+	}
+	.kvc-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 0.9rem 0 0;
+		font: 0.72rem var(--mono);
+		color: var(--muted);
+	}
+	.kvc-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+	}
+	.sw {
+		display: inline-block;
+		width: 0.85rem;
+		height: 0.85rem;
+		border-radius: 3px;
+		border: 1px solid var(--box-line);
+	}
+	.sw:last-of-type {
+		margin-right: 3px;
+	}
+	.sw.k.computed {
+		background: var(--k-new);
+	}
+	.sw.v.computed {
+		background: var(--v-new);
+	}
+	.sw.k.cached {
+		background: var(--k-old);
+	}
+	.sw.v.cached {
+		background: var(--v-old);
+	}
+	.sw.q {
+		background: var(--q);
+	}
+	.sw.mask {
+		background: var(--mask);
+	}
+	.sw.decoded {
+		background: var(--dec);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 760px) {
+		.kvc {
+			padding: 1rem;
+		}
+	}
+</style>

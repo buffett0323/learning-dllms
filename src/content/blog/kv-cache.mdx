@@ -6,18 +6,20 @@ pubDate: '2026-10-25'
 ---
 
 import BlockCacheDemo from '../../components/BlockCacheDemo.astro';
-import CacheDemo from '../../components/CacheDemo.astro';
+import KVCacheCompare from '../../components/KVCacheCompare.astro';
 import Note from '../../components/Note.astro';
 
 ## The problem
 
-Each cell below is one token's keys and values (K/V) at one layer. In an AR model, causal attention means token $i$ only sees positions $\le i$, which never change: every cell is computed once and reused forever.
+An AR model computes each position's keys and values (K/V) once and keeps them. Causal attention means position $i$ only sees positions $\le i$, and those never change, so old K/V stay exact forever. Each step computes one new position.
 
-In a dLLM, one step unmasks a position. Layer 1 only sees each token itself, so just that column changes. But from layer 2 up every position attends to it, so **every** cell is stale. A second, quieter problem: AR caching assumes you know which position comes next; a dLLM only finds out after the forward pass.
+A dLLM unmasks a position at each step, and with bidirectional attention every position attends to it. So every K/V from the last step is **stale**, and an exact dLLM recomputes all of them, at every step. (Strictly, at layer 1 only the changed position's K/V change; from layer 2 up, all of them do.) A second, quieter problem: AR knows which position comes next; a dLLM finds out only after the forward pass.
 
-<CacheDemo caption="Step through AR, then dLLM, exact. The third mode reuses the prompt even though it is slightly stale, which is the bet every training-free method below makes in some form." />
+<KVCacheCompare caption="Two consecutive steps, drawn after dKV-Cache's Fig. 1. AR reuses every old K/V and computes one position. In the dLLM, “sat” replaces a mask, and every position saw that mask, so last step's K/V cannot be reused exactly." />
 
-The way out is empirical: stale K/V are **close** to fresh ones. Adjacent steps have cosine similarity near 1, decoded tokens settle, and only a few tokens change much per step. The papers differ in which stale cells they trust, and for how long.
+**Staleness** is the main problem, and it is uneven. The prompt never changes, so its K/V barely move: cache them once and accept the small error. {/* Every training-free method below starts from that bet. */}
+
+The way out is empirical: stale K/V are **close** to fresh ones. Adjacent steps have cosine similarity near 1, decoded tokens settle, and only a few tokens change much per step. The papers differ in which stale K/V they trust, and for how long.
 
 ## Reuse a stale cache (training-free)
 
