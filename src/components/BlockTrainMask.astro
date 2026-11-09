@@ -1,0 +1,245 @@
+---
+// Training inputs and attention masks, side by side.
+// (a) Masked diffusion (LLaDA): one noisy copy x_t, one noise level, full attention.
+// (b) Block diffusion (BD3-LM): [x_t, x_0], one noise level per block. Noisy block b sees itself and
+//     the clean blocks before it; the clean copy is block-causal and produces those clean K/V.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const clean = ['The', 'cat', 'sat', 'on', 'a', 'mat'];
+const block = 2;
+const M = '▢';
+// (a) one t for the whole sequence; (b) one t per block.
+const noisyA = ['The', M, M, 'on', M, 'mat'];
+const noisyB = [M, 'cat', M, M, 'a', M];
+const L = clean.length;
+const blockOf = (i: number) => Math.floor(i / block);
+
+type Kind = 'self' | 'ctx' | 'clean' | 'full' | 'off';
+const kindB = (q: number, k: number): Kind => {
+	const qn = q < L;
+	const kn = k < L;
+	const qb = blockOf(q % L);
+	const kb = blockOf(k % L);
+	if (qn && kn) return qb === kb ? 'self' : 'off';
+	if (qn && !kn) return kb < qb ? 'ctx' : 'off';
+	if (!qn && !kn) return kb <= qb ? 'clean' : 'off';
+	return 'off';
+};
+const idx = (n: number) => Array.from({ length: n }, (_, i) => i);
+const tokB = [...noisyB, ...clean];
+---
+
+<figure class="btm">
+	<div class="btm-row">
+		<div class="btm-panel">
+			<p class="btm-name">(a) Masked diffusion</p>
+			<p class="btm-sub">input <i>x</i><sub><i>t</i></sub>, one noise level <i>t</i></p>
+			<div class="btm-grid" style={`--n:${L}`}>
+				<span />
+				{noisyA.map((t) => <span class:list={['btm-tok', { m: t === M }]}>{t}</span>)}
+				{idx(L).map((q) => [
+					<span class:list={['btm-tok', 'row', { m: noisyA[q] === M }]}>{noisyA[q]}</span>,
+					...idx(L).map(() => <span class="btm-cell full" />),
+				])}
+			</div>
+		</div>
+
+		<div class="btm-panel">
+			<p class="btm-name">(b) Block diffusion</p>
+			<p class="btm-sub">input [<i>x</i><sub><i>t</i></sub>, <i>x</i><sub>0</sub>], one noise level <i>t</i><sub><i>b</i></sub> per block of {block}</p>
+			<div class="btm-grid wide" style={`--n:${2 * L}`}>
+				<span />
+				{tokB.map((t, k) => <span class:list={['btm-tok', { m: t === M, gap: k === L, b: k % block === 0 && k % L !== 0 }]}>{t}</span>)}
+				{idx(2 * L).map((q) => [
+					<span class:list={['btm-tok', 'row', { m: tokB[q] === M, gapr: q === L }]}>{tokB[q]}</span>,
+					...idx(2 * L).map((k) => (
+						<span class:list={['btm-cell', kindB(q, k), { gap: k === L, gapr: q === L }]} />
+					)),
+				])}
+			</div>
+			<p class="btm-axis"><span><i>x</i><sub><i>t</i></sub> (noisy)</span><span><i>x</i><sub>0</sub> (clean)</span></p>
+		</div>
+	</div>
+
+	<p class="btm-legend" aria-hidden="true">
+		<span><i class="sw full"></i>(a) everything sees everything</span>
+		<span><i class="sw self"></i>noisy block sees itself, both ways</span>
+		<span><i class="sw ctx"></i>noisy block sees clean earlier blocks</span>
+		<span><i class="sw clean"></i>clean copy, block-causal: makes the clean K/V</span>
+		<span><i class="sw off"></i>no attention</span>
+		<span><i class="sw m">▢</i>[MASK]; the loss is on these only</span>
+	</p>
+	<p class="btm-axes">rows: the token being computed · columns: tokens it can attend to</p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+	.btm {
+		--c-self: #c2410c;
+		--c-ctx: #2f7d4f;
+		--c-clean: #2f6fb3;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .btm {
+		--c-self: #e06a2c;
+		--c-ctx: #4fb07a;
+		--c-clean: #4f8fd6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .btm {
+			--c-self: #e06a2c;
+			--c-ctx: #4fb07a;
+			--c-clean: #4f8fd6;
+		}
+	}
+	.btm-row {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr);
+		gap: 2rem;
+		align-items: start;
+	}
+	.btm-name {
+		margin: 0;
+		font-family: var(--mono);
+		font-size: 0.75rem;
+		font-weight: 600;
+	}
+	.btm-sub {
+		margin: 0.15rem 0 0.6rem;
+		font-size: 0.85rem;
+		color: var(--muted);
+	}
+	.btm-grid {
+		display: grid;
+		grid-template-columns: 2rem repeat(var(--n), 1.05rem);
+		grid-auto-rows: 1.05rem;
+		gap: 2px;
+	}
+	.btm-tok {
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		font-family: var(--mono);
+		font-size: 0.5rem;
+		color: var(--muted);
+		writing-mode: vertical-rl;
+		transform: rotate(180deg);
+	}
+	.btm-tok:not(.row) {
+		height: 2rem;
+		align-self: end;
+	}
+	.btm-grid {
+		grid-template-rows: 2rem;
+	}
+	.btm-tok.row {
+		writing-mode: horizontal-tb;
+		transform: none;
+		justify-items: end;
+		padding-right: 0.25rem;
+	}
+	.btm-tok.m {
+		color: var(--fg);
+		font-size: 0.7rem;
+	}
+	.btm-cell {
+		border-radius: 2px;
+		background: var(--code-bg);
+	}
+	.btm-cell.full {
+		background: color-mix(in srgb, var(--fg) 30%, var(--surface));
+	}
+	.btm-cell.self {
+		background: var(--c-self);
+	}
+	.btm-cell.ctx {
+		background: var(--c-ctx);
+	}
+	.btm-cell.clean {
+		background: color-mix(in srgb, var(--c-clean) 70%, var(--surface));
+	}
+	.btm-cell.gap,
+	.btm-tok.gap {
+		margin-left: 4px;
+	}
+	.btm-cell.gapr,
+	.btm-tok.gapr {
+		margin-top: 4px;
+	}
+	.btm-axis {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		margin: 0.35rem 0 0 2rem;
+		max-width: calc(12 * 1.05rem + 11 * 2px + 4px);
+		font-family: var(--mono);
+		font-size: 0.6rem;
+		text-align: center;
+		color: var(--muted);
+	}
+	.btm-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 1.1rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.btm-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.9rem;
+		height: 0.9rem;
+		display: inline-grid;
+		place-items: center;
+		border-radius: 3px;
+		font-style: normal;
+		font-size: 0.7rem;
+		color: var(--fg);
+	}
+	.sw.full {
+		background: color-mix(in srgb, var(--fg) 30%, var(--surface));
+	}
+	.sw.self {
+		background: var(--c-self);
+	}
+	.sw.ctx {
+		background: var(--c-ctx);
+	}
+	.sw.clean {
+		background: color-mix(in srgb, var(--c-clean) 70%, var(--surface));
+	}
+	.sw.off {
+		background: var(--code-bg);
+		border: 1px solid var(--line);
+	}
+	.btm-axes {
+		margin: 0.6rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.btm {
+			padding: 1rem;
+		}
+		.btm-row {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

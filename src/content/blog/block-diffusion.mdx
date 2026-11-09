@@ -1,0 +1,88 @@
+---
+title: 'Block diffusion'
+hook: 'Autoregressive across blocks, diffusion within them.'
+description: 'What block diffusion (BD3-LM) changes from a full-attention dLLM: the block-causal mask, the block-wise likelihood, training on [x_t, x_0] in one pass, and what it buys and costs at inference: an exact KV cache, variable length, and blocks that run in sequence.'
+pubDate: '2026-11-09'
+---
+
+import BlockTrainMask from '../../components/BlockTrainMask.astro';
+import BlockVsFull from '../../components/BlockVsFull.astro';
+import Note from '../../components/Note.astro';
+
+LLaDA can already decode in blocks: split the canvas into blocks and run the diffusion loop on one block at a time, left to right (M05). **Block diffusion** does more: it builds the blocks into the model. Attention is bidirectional inside a block and causal across blocks, and the model is trained that way.
+
+<Note>
+	Decoding in blocks is not the same as block diffusion. What decides is the attention mask, not the decoding order. With full attention, a finished block still attends to everything to its right, so its K/V change whenever a later token is decoded.
+</Note>
+
+## Same order, different mask
+
+Both models below decode the same answer in the same order. Step through and watch the prompt and block 1 once block 2 starts.
+
+<BlockVsFull caption="Top: LLaDA-style full attention with block-by-block sampling. Finished blocks attend to the block being decoded, so their K/V go stale every step, and the masks on the right are computed long before they are decoded. Bottom: block diffusion. Earlier blocks cannot attend to later ones, so once a block is finished its K/V are final. Each step runs only the current block, and the sequence grows until eos." />
+
+Three differences follow from the mask:
+
+1. **Exact KV cache.** A finished block's K/V depend only on itself and earlier blocks, which never change again. So the cache is exact, as in AR. With full attention, any cache is an approximation that needs refreshing (P01).
+2. **Less work per step.** Only the current block runs. Full attention also runs every mask to the right, every step.
+3. **Variable length.** Full attention needs the canvas length before decoding starts (M04). Block diffusion appends blocks until it emits eos, like AR. BD3-LM samples up to ~10K tokens with a 1024-token training context; SEDD, a full-attention model, is capped at 1024.
+
+## The model
+
+Split the sequence $x$ of length $L$ into $B$ blocks of $L'$ tokens. Factorize over blocks, as AR factorizes over tokens:
+
+$$
+\log p_\theta(x) = \sum_{b=1}^{B} \log p_\theta\left(x^b \mid x^{<b}\right)
+$$
+
+Each factor is a masked diffusion model over one block, conditioned on the clean blocks before it. Its loss is the masked diffusion loss of M03, restricted to block $b$.
+
+Block size is a dial between the two families:
+
+- $L' = 1$: one token per block, which is AR.
+- $L' = L$: one block, which is plain masked diffusion (MDLM, LLaDA).
+
+Between them, smaller blocks are closer to AR in quality but give less to decode in parallel. BD3-LM on OpenWebText, 110M parameters (perplexities of diffusion models are upper bounds):
+
+| Model | Test PPL ↓ | Gen. PPL ↓ (1024 tokens) |
+|---|---|---|
+| AR | 17.54 | 14.1 |
+| BD3-LM, $L' = 4$ | ≤ 20.73 | 25.7 |
+| BD3-LM, $L' = 8$ | ≤ 21.68 | 30.4 |
+| BD3-LM, $L' = 16$ | ≤ 22.27 | 33.4 |
+| MDLM ($L' = L$) | ≤ 22.98 | 46.8 |
+
+## Training: two copies in one pass
+
+A block is decoded while the blocks before it are clean. So training noises each block with its own level $t_b$, and the noisy block $b$ must see the **clean** versions of blocks $< b$. A single noisy copy cannot give both.
+
+BD3-LM's fix is to concatenate the noisy and clean sequences, $[x_t, x_0]$ with length $2L$, and train all blocks in one forward pass with this mask:
+
+<BlockTrainMask caption="Left: masked diffusion trains on one noisy copy with one noise level and full attention. Right: block diffusion trains on [x_t, x_0]. A noisy block attends to itself both ways (orange) and to the clean earlier blocks (green). The clean copy is block-causal (blue) and supplies those clean K/V, like teacher forcing. Nothing attends from x_0 to x_t. The loss is taken on the masked tokens of x_t only." />
+
+The price is twice the tokens per forward pass, and about three quarters of the $2L \times 2L$ mask is empty. Fast-dLLM v2 uses the same scheme and runs it with FlexAttention, which skips the empty tiles ([my notes](../../papers/fast-dllm-v2/)).
+
+## A surprise at $L' = 1$
+
+At $L' = 1$ the block diffusion loss equals the AR loss in expectation, yet BD3-LM first trained to perplexity ≤ 25.56 against AR's 22.88 on LM1B. The cause is variance, not the model. With $t \sim U(0, 1)$, half the tokens are masked on average, so each batch gives gradients from half as many tokens as AR's. Masking every token at $L' = 1$ makes the loss exactly AR's and closes the gap (22.88).
+
+For larger blocks, BD3-LM samples the mask rate from a **clipped** range $U[\beta, \omega]$ instead of $U[0, 1]$: almost-clean and fully masked blocks teach little and add noise. The best range depends on $L'$ and is tuned during training.
+
+## What it costs
+
+- **Context on the right.** A token sees the rest of its block, but never later blocks. Full attention can revise early text in light of later text; block diffusion cannot.
+- **Blocks run in sequence.** Parallelism exists only inside a block. With small blocks, decoding is close to AR in the number of forward passes. D2F pipelines blocks to win some of this back.
+- **The current block.** Inside it, attention is still bidirectional, so a cache within the block is again approximate. Fast-dLLM v2 adds DualCache at the sub-block level for this.
+
+## Who uses it
+
+The larger recent dLLMs are block diffusion models converted from AR checkpoints (M07): SDAR, Fast-dLLM v2 and LLaDA 2.0. The caching side, where finished blocks form an exact cache, is P03.
+
+## References
+
+1. Arriola et al. *Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models* (BD3-LM). ICLR 2025. [arXiv](https://arxiv.org/abs/2503.09573)
+2. Sahoo et al. *Simple and Effective Masked Diffusion Language Models* (MDLM). NeurIPS 2024.
+3. Wu et al. *Fast-dLLM v2: Efficient Block-Diffusion LLM*. ICLR 2026.
+4. Cheng et al. *SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation*. 2025.
+5. Bie et al. *LLaDA2.0: Scaling Up Diffusion Language Models to 100B*. 2025.
+6. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025.
