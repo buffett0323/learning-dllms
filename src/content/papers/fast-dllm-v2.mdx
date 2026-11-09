@@ -1,0 +1,72 @@
+---
+title: 'Fast-dLLM v2: Efficient Block-Diffusion LLM'
+authors: 'Chengyue Wu, Hao Zhang, Shuchen Xue, Shizhe Diao, Yonggan Fu, Zhijian Liu, Pavlo Molchanov, Ping Luo, Song Han, Enze Xie'
+venue: 'arXiv'
+year: 2025
+pdf: 'fast-dllm2.pdf'
+url: 'https://arxiv.org/abs/2509.26328'
+license: 'CC BY-NC-ND 4.0'
+hook: 'Turn Qwen2.5 into a block diffusion model with ~1B tokens of fine-tuning, then decode with a block-level cache plus a sub-block DualCache.'
+readDate: '2026-11-08'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import Highlight from '../../components/Highlight.astro';
+
+Fast-dLLM (v1) sped up LLaDA and Dream without training, but its cache was an approximation. v2 changes the model instead: fine-tune an AR model (Qwen2.5-1.5B/7B) into a **block diffusion** model, causal across blocks of 32 and bidirectional inside each block. Then:
+
+- **Training** (§3.2): mask tokens inside each block, train each sample with a mask and its complement, keep the AR token shift. About 1B tokens, against ~500B for Dream.
+- **Inference** (§3.3): earlier blocks are final, so their K/V are an exact cache. Inside the current block, decode sub-blocks of 8 with v1's confidence threshold and DualCache.
+
+Result: on par with Qwen2.5-7B fine-tuned on the same data with next-token loss (avg 60.3 vs 59.6), and 2.5× its throughput at threshold 0.9.
+
+{/* <Annotation page={3} line={21} text="caching mechanisms and advanced decoding strategies." color="blue"> */}
+{/* The P track's first two groups follow this split. */}
+
+{/* - **Caching mechanisms:** DualCache, dKV-Cache, dLLM-Cache ([P01](../../posts/kv-cache/)); Sparse-dLLM ([P02](../../posts/sparse-kv/)); the exact block-level cache of this paper and SDAR (P03, planned); DPad's suffix window (P04, planned). */}
+{/* - **Decoding strategies:** confidence threshold, EB-Sampler, Dimple ([P05](../../posts/parallel-decoding/)); WINO's draft-and-verify (P06, planned); Prophet, SlowFast and temporal voting, which use the trajectory over steps (P07, planned). */}
+{/* </Annotation> */}
+
+<Annotation page={4} line={43} text="we use a complementary masking strategy" color="green">
+**Why complementary masks help.** One sample, two copies: mask $m$ and mask $\bar m = 1 - m$. A token masked in one copy is visible in the other.
+
+- **Every token gets a loss.** The loss counts only masked positions. With one random mask at ratio $t \sim U(0,1)$, about half the tokens of a sample give no gradient. With the pair, every token is predicted exactly once. With only ~1B tokens of data, using all of them matters. (LaViDa, cited here, introduced the pair so that no token of a sample goes unused.)
+- **Less noise.** Which tokens a random mask hides is luck, and that luck adds variance to the gradient. The pair removes much of it: the two copies always cover the whole sample, once each.
+- **Both roles.** Within a block, token $j$ is a target while $k$ is context, and the other way round in the other copy. This is what bidirectional attention inside a block must learn.
+
+Ablation (Table 2, 1.5B): + pad 42.2 → + pad + CM 45.0 average; HumanEval 38.4 → 43.9. The cost is two forward passes per sample. The paper holds the training steps fixed, so part of the gain may simply be more compute per sample.
+</Annotation>
+
+<Annotation page={5} line={20} text="Block-wise attention masking. We use a hybrid attention scheme" color="blue">
+**Why concatenate $x_t$ and $x_0$.** At inference, a block is decoded while every earlier block is already clean. To train all blocks in one forward pass, the input is $[x_t, x_0]$, length $2L$:
+
+- noisy block $b$ attends to itself, bidirectionally, and to the **clean** blocks $< b$ in $x_0$;
+- clean block $b$ attends block-causally to clean blocks $\le b$, which produces those clean K/V, like teacher forcing.
+
+Nothing attends from $x_0$ to $x_t$. The loss is taken on the masked positions of $x_t$ only. This is BD3-LM's scheme.
+</Annotation>
+
+<Annotation page={5} line={27} text="We further employ the flex-attention implementation">
+**FlexAttention** is a PyTorch API (`torch.nn.attention.flex_attention`, since 2.5). You write the mask as a function of the query and key index, and `torch.compile` turns it into one fused, FlashAttention-style kernel:
+
+```python
+def mask_mod(b, h, q, kv):
+    q_noisy, k_noisy = q < L, kv < L
+    qb, kb = (q % L) // D, (kv % L) // D          # block index
+    return torch.where(q_noisy,
+        torch.where(k_noisy, qb == kb, kb < qb),   # x_t: own block, clean earlier blocks
+        ~k_noisy & (kb <= qb))                     # x_0: block-causal on x_0
+block_mask = create_block_mask(mask_mod, None, None, 2 * L, 2 * L)
+out = flex_attention(q, k, v, block_mask=block_mask)
+```
+
+`create_block_mask` checks the mask once per 128 × 128 tile and records which tiles are fully masked; the kernel skips them. Here about three quarters of the $2L \times 2L$ matrix is masked. Without it, you pass a dense $2L \times 2L$ boolean mask to standard attention: the mask itself takes memory, the fastest kernels do not accept arbitrary masks, and every masked tile is still computed and then thrown away.
+</Annotation>
+
+<Annotation page={6} line={20} text="(i.e., threshold is set to 1)." color="pink">
+**The threshold** is $\tau$ in v1's confidence-aware parallel decoding ([P05](../../posts/parallel-decoding/), [v1 notes](../fast-dllm/)). At each step, inside the current sub-block, commit every masked token whose top probability exceeds $\tau$; if none does, commit the single most confident one.
+
+A probability never exceeds 1, so with $\tau = 1$ only the fallback fires: **one token per step**, no parallel decoding. A 32-token block then takes 32 forward passes, as many as AR, though in order of confidence rather than left to right. So the accuracy in Table 1 is the model itself, without any loss from parallel decoding. The speed results (Fig. 1, Fig. 5) use $\tau = 0.9$: on GSM8K, 39.1 → 101.7 tokens/s for a small accuracy drop (Fig. 4).
+</Annotation>
+
+<Highlight page={7} line={31} text="setting the threshold to 1.0 recovers the standard non-parallel decoding process" color="pink" />

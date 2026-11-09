@@ -53,12 +53,22 @@ export const tracks: Track[] = [
 		title: 'Into Production',
 		blurb: 'What it takes to serve a diffusion LLM fast and cheaply: caching, parallel decoding, batching, and the shape of an inference engine.',
 		groups: [
+			// Two groups after Fast-dLLM v2 §2.3: caching mechanisms and advanced decoding strategies.
 			{
-				title: 'Making one request fast',
+				title: 'Caching mechanisms',
 				notes: [
 					{ slug: 'kv-cache', title: 'Caching without causality', hook: 'Bidirectional attention breaks the KV cache. Mostly.' },
-					{ slug: 'parallel-decoding', title: 'Parallel decoding', hook: 'How many tokens can we commit in one step?' },
 					{ slug: 'sparse-kv', title: 'Keeping fewer tokens', hook: 'Most keys get almost no attention. Which ones can each head drop?' },
+					{ slug: 'block-cache', title: 'An exact cache again', hook: 'Make attention causal between blocks, and the KV cache stops being an approximation.' },
+					{ slug: 'suffix-window', title: 'Trimming the masked suffix', hook: 'Hundreds of trailing masks, and the model barely looks past the first few.' },
+				],
+			},
+			{
+				title: 'Decoding strategies',
+				notes: [
+					{ slug: 'parallel-decoding', title: 'Parallel decoding', hook: 'How many tokens can we commit in one step?' },
+					{ slug: 'draft-verify', title: 'Draft, verify, remask', hook: 'Commit aggressively, then let bidirectional context take the wrong ones back.' },
+					{ slug: 'trajectory', title: 'Reading the denoising trajectory', hook: 'The answer often settles long before the last step. Stop there, or let the steps vote.' },
 				],
 			},
 			{

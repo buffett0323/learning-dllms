@@ -53,7 +53,7 @@ These run on full-attention dLLMs like LLaDA and Dream as they are.
 The trend: training-free methods moved from fixed schedules to adaptive ones that measure drift, while new models build the block structure in so that most of the cache is exact. Reported speedups use different models, lengths and baselines, so do not compare them across rows.
 
 <Note kind="question">
-	Every row keeps more K/V per request than a plain recompute. How does that interact with batching many requests on one GPU? P04.
+	Every row keeps more K/V per request than a plain recompute. How does that interact with batching many requests on one GPU? P08.
 </Note>
 
 ## References

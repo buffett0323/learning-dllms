@@ -1,0 +1,411 @@
+---
+// Logit decomposition on vs off (dLLM-Serve §4.2–4.3), for one Refresh step of 16 requests × 2048 tokens.
+// Left: the LM head makes all [N, V] logits at once. Right: max_num_logits = 2048, so 16 chunks, each freed
+// before the next. The startup profiler reserves the peak of this step for activations; what is left after
+// the weights is the KV pool, so the lower peak turns into more requests in memory.
+// Rough LLaDA-8B numbers (d = 4096, MLP 12,288, V = 126,464, FP16, no GQA), L40S 48 GB, 16 GB of weights.
+// Layer activations: hidden states + QKV (attention part) or gate/up (MLP part). Guard band left out.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const N = 16 * 2048;
+const gb = (x: number) => (x * 2) / 1e9;
+const model = {
+	gpu: 48,
+	weights: 16,
+	kvPerRequest: gb(2048 * 32 * 2 * 4096), // 1.07 GB
+	hidden: gb(N * 4096), // 0.27 GB, lives through the pass
+	attn: gb(N * 4096 * 3), // Q, K, V
+	mlp: gb(N * 12288 * 2), // gate and up
+	logits: gb(N * 126464), // 8.3 GB
+	chunks: N / 2048,
+};
+const lanes = [
+	{ id: 'off', title: 'Without', sub: 'all logits at once' },
+	{ id: 'on', title: 'With logit decomposition', sub: 'max_num_logits = 2,048 (16 chunks)' },
+];
+---
+
+<figure class="lcp" data-lcp data-model={JSON.stringify(model)}>
+	<div class="lc-controls">
+		<p class="lc-stage" data-stage>One Refresh step</p>
+		<div class="lc-buttons">
+			<button class="btn icon" type="button" data-act="reset" aria-label="Reset">↺</button>
+			<button class="btn primary" type="button" data-act="play">Play</button>
+		</div>
+	</div>
+	<div class="lc-lanes">
+		{
+			lanes.map((l) => (
+				<section class="lc-lane" data-lane={l.id}>
+					<p class="lc-title">
+						<b>{l.title}</b> <span>{l.sub}</span>
+					</p>
+					<svg viewBox="0 0 320 132" role="img" aria-label={`Activation memory over one forward pass, ${l.title.toLowerCase()}`}>
+						<g class="lc-grid" data-grid />
+						<clipPath id={`lc-clip-${l.id}`}>
+							<rect data-clip x="0" y="0" width="0" height="132" />
+						</clipPath>
+						<g clip-path={`url(#lc-clip-${l.id})`}>
+							<path class="lc-area layer" data-area="layer" />
+							<path class="lc-area head" data-area="head" />
+						</g>
+						<line class="lc-peak" data-peak x1="30" x2="314" />
+						<text class="lc-peak-lab" data-peak-lab x="312" text-anchor="end" />
+						<line class="lc-head" data-play y1="8" y2="112" />
+						<text class="lc-axis" x="30" y="126">decoder layers (6 of 32)</text>
+						<text class="lc-axis" x="314" y="126" text-anchor="end">LM head</text>
+					</svg>
+					<p class="lc-num" data-mem />
+					<div class="lc-gpu" data-gpu>
+						<span class="w">weights</span>
+						<span class="r" data-res />
+						<span class="kv" data-kv />
+					</div>
+					<p class="lc-num" data-fit />
+				</section>
+			))
+		}
+	</div>
+	<p class="lc-note" data-note></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	interface Model {
+		gpu: number;
+		weights: number;
+		kvPerRequest: number;
+		hidden: number;
+		attn: number;
+		mlp: number;
+		logits: number;
+		chunks: number;
+	}
+	// Timeline in seconds: the forward pass, then the startup reservation, then filling the KV pool.
+	const PASS = 5.5;
+	const RESERVE = 1.2;
+	const FILL = 2.2;
+	const END = PASS + RESERVE + FILL;
+	const HEAD0 = 0.7; // share of the pass spent in decoder layers (stretched for legibility)
+	const HEAD1 = 0.97;
+	const LAYERS = 6;
+	const X0 = 30;
+	const X1 = 314;
+	const Y0 = 112;
+	const YMAX = 9; // GB at the top of the plot
+	const Ytop = 8;
+
+	document.querySelectorAll<HTMLElement>('[data-lcp]').forEach((fig) => {
+		const M: Model = JSON.parse(fig.dataset.model!);
+		const fmt = (v: number) => `${v.toFixed(v < 1 ? 2 : 1)} GB`;
+		const x = (t: number) => X0 + t * (X1 - X0);
+		const y = (g: number) => Y0 - (g / YMAX) * (Y0 - Ytop);
+
+		// Activation memory at time t in [0, 1] of the pass.
+		function mem(cap: boolean, t: number) {
+			if (t < HEAD0) {
+				const w = HEAD0 / LAYERS;
+				const u = (t % w) / w;
+				if (u < 0.08 || u > 0.94) return M.hidden;
+				return M.hidden + (u < 0.4 ? M.attn : M.mlp);
+			}
+			if (t < HEAD0 + 0.02) return M.hidden;
+			if (t >= HEAD1) return 0.02;
+			if (!cap) return M.hidden + M.logits;
+			const u = ((t - HEAD0 - 0.02) / (HEAD1 - HEAD0 - 0.02)) * M.chunks;
+			return u - Math.floor(u) < 0.2 ? M.hidden : M.hidden + M.logits / M.chunks;
+		}
+		const SAMPLES = 900;
+		const area = (cap: boolean, from: number, to: number) => {
+			let d = `M${x(from).toFixed(1)},${Y0}`;
+			for (let i = 0; i <= SAMPLES; i++) {
+				const t = from + ((to - from) * i) / SAMPLES;
+				d += `L${x(t).toFixed(1)},${y(mem(cap, t)).toFixed(1)}`;
+			}
+			return d + `L${x(to).toFixed(1)},${Y0}Z`;
+		};
+		// Running peak, for the dashed line.
+		const peakUpTo = (cap: boolean, t: number) => {
+			let p = 0;
+			for (let i = 0; i <= 300; i++) p = Math.max(p, mem(cap, (t * i) / 300));
+			return p;
+		};
+		const lanes = [...fig.querySelectorAll<HTMLElement>('[data-lane]')].map((el) => {
+			const cap = el.dataset.lane === 'on';
+			const peak = peakUpTo(cap, 1);
+			const kv = M.gpu - M.weights - peak;
+			const fit = Math.floor(kv / M.kvPerRequest);
+			const q = <T extends Element>(s: string) => el.querySelector<T>(s)!;
+			q('[data-area="layer"]').setAttribute('d', area(cap, 0, HEAD0 + 0.02));
+			q('[data-area="head"]').setAttribute('d', area(cap, HEAD0 + 0.02, 1));
+			q('[data-grid]').innerHTML = [0, 2, 4, 6, 8]
+				.map((g) => `<line x1="${X0}" x2="${X1}" y1="${y(g)}" y2="${y(g)}"/><text x="${X0 - 4}" y="${y(g) + 3}" text-anchor="end">${g}</text>`)
+				.join('') + `<text x="${X0 - 4}" y="${Ytop - 1}" text-anchor="end">GB</text>`;
+			const cells = Array.from({ length: fit }, () => '<i></i>').join('');
+			q('[data-kv]').innerHTML = cells;
+			return { el, cap, peak, kv, fit, q };
+		});
+		const best = Math.max(...lanes.map((l) => l.fit));
+		const [off, on] = lanes;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		const stage = fig.querySelector<HTMLElement>('[data-stage]')!;
+		const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+		const pct = (v: number) => `${(v / M.gpu) * 100}%`;
+
+		let clock = 0;
+		let raf = 0;
+		let last = 0;
+
+		function render() {
+			const t = Math.min(1, clock / PASS);
+			const r = Math.min(1, Math.max(0, (clock - PASS) / RESERVE));
+			const f = Math.min(1, Math.max(0, (clock - PASS - RESERVE) / FILL));
+			for (const l of lanes) {
+				const { q } = l;
+				q<SVGRectElement>('[data-clip]').setAttribute('width', String(x(t)));
+				const play = q<SVGLineElement>('[data-play]');
+				play.setAttribute('x1', String(x(t)));
+				play.setAttribute('x2', String(x(t)));
+				play.style.opacity = clock > 0 && t < 1 ? '1' : '0';
+				const p = peakUpTo(l.cap, t);
+				const peakEl = q<SVGLineElement>('[data-peak]');
+				peakEl.setAttribute('y1', String(y(p)));
+				peakEl.setAttribute('y2', String(y(p)));
+				peakEl.style.opacity = clock > 0 ? '1' : '0';
+				const lab = q<SVGTextElement>('[data-peak-lab]');
+				lab.setAttribute('y', String(y(p) - 3));
+				lab.textContent = clock > 0 ? `peak ${fmt(p)}` : '';
+				q('[data-mem]').innerHTML = clock === 0 ? '&nbsp;' : t < 1 ? `now <b>${fmt(mem(l.cap, t))}</b> · peak <b>${fmt(p)}</b>` : `peak <b>${fmt(l.peak)}</b>: the profiler reserves this`;
+				const res = r * l.peak;
+				q<HTMLElement>('.w').style.width = pct(M.weights);
+				q<HTMLElement>('[data-res]').style.width = pct(res);
+				q<HTMLElement>('[data-res]').textContent = res > 3 ? 'reserved' : '';
+				q<HTMLElement>('[data-kv]').style.width = pct(M.gpu - M.weights - res);
+				q<HTMLElement>('[data-kv]').style.setProperty('--cell', `${(M.kvPerRequest / (M.gpu - M.weights - res)) * 100}%`);
+				const shown = Math.floor(f * best + 1e-9);
+				q('[data-kv]').querySelectorAll('i').forEach((c, i) => c.classList.toggle('on', i < shown));
+				const n = Math.min(shown, l.fit);
+				q('[data-fit]').innerHTML =
+					r < 1
+						? '&nbsp;'
+						: `KV pool <b>${fmt(l.kv)}</b> → <b>${n}</b>${n === l.fit && f > 0 ? '' : '…'} requests of 2,048 tokens`;
+			}
+
+			let text: string;
+			if (clock === 0) {
+				stage.textContent = 'One Refresh step';
+				text = `Same batch on both sides, 16 requests × 2,048 tokens of LLaDA-8B, same weights and FLOPs. The only difference is how the last layer, the LM head, produces its logits. Press play.`;
+			} else if (t < HEAD0) {
+				stage.textContent = 'Decoder layers';
+				text = `Decoder layers: each layer makes temporary tensors (Q, K, V, then the MLP's ${fmt(M.mlp)} gate/up) and frees them. Identical on both sides; peak ${fmt(M.hidden + M.mlp)}.`;
+			} else if (t < 1) {
+				stage.textContent = 'LM head';
+				text = `LM head, Z = HWᵀ of size N × V. Left: one 32,768 × 126,464 tensor, N·V·2 bytes = ${fmt(M.logits)}, alive for a single multiply. Right: ${M.chunks} chunks of ${fmt(M.logits / M.chunks)}; each is reduced to a token id and a confidence per position, then freed before the next.`;
+			} else if (r < 1) {
+				stage.textContent = 'Startup reservation';
+				text = `At startup the engine runs exactly this worst-case step, measures the peak, and reserves it for activations for the whole life of the server. Left reserves ${fmt(off.peak)}; right ${fmt(on.peak)}, and now the MLP, not the logits, sets the peak.`;
+			} else {
+				stage.textContent = 'KV pool';
+				text =
+					f < 1
+						? `Whatever is left after weights and the reservation becomes the KV pool. Each request needs about ${fmt(M.kvPerRequest)} of dense K/V…`
+						: `Left fits ${off.fit} requests, right ${on.fit}: <b>+${on.fit - off.fit} (+${Math.round((on.fit / off.fit - 1) * 100)}%)</b>. That is all it changes: memory, not FLOPs or outputs. More requests in memory means bigger Reuse batches, which are bandwidth-bound and so nearly free. Reserve less without chunking and the left spike is an OOM.`;
+			}
+			note.innerHTML = text;
+			playBtn.textContent = raf ? 'Pause' : clock >= END ? 'Replay' : 'Play';
+			fig.querySelector<HTMLButtonElement>('[data-act="reset"]')!.disabled = clock === 0;
+		}
+
+		function stop() {
+			cancelAnimationFrame(raf);
+			raf = 0;
+		}
+		function tick(now: number) {
+			clock = Math.min(END, clock + (now - last) / 1000);
+			last = now;
+			if (clock >= END) stop();
+			else raf = requestAnimationFrame(tick);
+			render();
+		}
+		playBtn.addEventListener('click', () => {
+			if (raf) return stop(), render();
+			if (clock >= END) clock = 0;
+			if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+				clock = END;
+				return render();
+			}
+			last = performance.now();
+			raf = requestAnimationFrame(tick);
+			render();
+		});
+		fig.querySelector('[data-act="reset"]')!.addEventListener('click', () => (stop(), (clock = 0), render()));
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.lcp {
+		--c-run: #c2410c;
+		--c-cache: #2f6fb3;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .lcp {
+		--c-run: #e06a2c;
+		--c-cache: #4f8fd6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .lcp {
+			--c-run: #e06a2c;
+			--c-cache: #4f8fd6;
+		}
+	}
+	.lcp:not(.ready) {
+		display: none;
+	}
+	.lc-controls {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.75rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.lc-stage {
+		margin: 0;
+		font: 0.78rem var(--mono);
+		color: var(--fg);
+	}
+	.lc-buttons {
+		display: flex;
+		gap: 0.5rem;
+	}
+	.lc-buttons .primary {
+		min-width: 5.5rem;
+	}
+	.lc-lanes {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 1.5rem;
+		margin-top: 1rem;
+	}
+	.lc-title {
+		margin: 0 0 0.3rem;
+		font-size: 0.9rem;
+	}
+	.lc-title span {
+		display: block;
+		font: 0.7rem var(--mono);
+		color: var(--muted);
+	}
+	svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		overflow: visible;
+	}
+	.lc-grid :global(line) {
+		stroke: var(--line);
+		stroke-width: 0.6;
+	}
+	.lc-grid :global(text),
+	.lc-axis {
+		font: 8.5px var(--mono);
+		fill: var(--muted);
+	}
+	.lc-area.layer {
+		fill: color-mix(in srgb, var(--fg) 28%, var(--surface));
+	}
+	.lc-area.head {
+		fill: var(--c-run);
+	}
+	.lc-peak {
+		stroke: var(--fg);
+		stroke-width: 1;
+		stroke-dasharray: 3 2;
+		transition: opacity 0.2s;
+	}
+	.lc-peak-lab {
+		font: 8.5px var(--mono);
+		fill: var(--fg);
+	}
+	.lc-head {
+		stroke: var(--c-run);
+		stroke-width: 1;
+	}
+	.lc-num {
+		margin: 0.35rem 0 0.6rem;
+		font: 0.68rem/1.5 var(--mono);
+		color: var(--muted);
+	}
+	.lc-num :global(b) {
+		color: var(--fg);
+	}
+	.lc-gpu {
+		display: flex;
+		height: 1.6rem;
+		overflow: hidden;
+		border-radius: 3px;
+		background: repeating-linear-gradient(135deg, var(--code-bg) 0 4px, var(--surface) 4px 8px);
+		font: 0.6rem var(--mono);
+	}
+	.lc-gpu > span {
+		display: grid;
+		place-items: center;
+		flex: none;
+		overflow: hidden;
+		white-space: nowrap;
+	}
+	.lc-gpu .w {
+		background: color-mix(in srgb, var(--fg) 25%, var(--surface));
+	}
+	.lc-gpu .r {
+		background: color-mix(in srgb, var(--c-run) 55%, var(--surface));
+	}
+	.lc-gpu .kv {
+		display: flex;
+		gap: 1px;
+		padding: 2px 0;
+		align-items: stretch;
+	}
+	.lc-gpu .kv :global(i) {
+		flex: none;
+		width: calc(var(--cell) - 1px);
+		border-radius: 1px;
+		background: color-mix(in srgb, var(--c-cache) 14%, var(--surface));
+		transition: background 0.15s;
+	}
+	.lc-gpu .kv :global(i.on) {
+		background: var(--c-cache);
+	}
+	.lc-note {
+		margin: 1rem 0 0;
+		min-height: 4.5em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	.lc-note :global(b) {
+		color: var(--fg);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 760px) {
+		.lcp {
+			padding: 1rem;
+		}
+		.lc-lanes {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

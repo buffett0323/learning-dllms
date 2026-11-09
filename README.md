@@ -40,20 +40,29 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 
 <!-- What it takes to serve a diffusion LLM fast and cheaply. -->
 
-#### Making one request fast
+#### Caching mechanisms
 
 | # | Note | Hook | Status |
 | --- | --- | --- | --- |
 | P01 | [Caching without causality](https://buffett0323.github.io/learning-dllms/posts/kv-cache/) | Bidirectional attention breaks the KV cache. Mostly. | live |
-| P02 | [Parallel decoding](https://buffett0323.github.io/learning-dllms/posts/parallel-decoding/) | How many tokens can we commit in one step? | live |
-| P03 | [Keeping fewer tokens](https://buffett0323.github.io/learning-dllms/posts/sparse-kv/) | Most keys get almost no attention. Which ones can each head drop? | live |
+| P02 | [Keeping fewer tokens](https://buffett0323.github.io/learning-dllms/posts/sparse-kv/) | Most keys get almost no attention. Which ones can each head drop? | live |
+| P03 | An exact cache again | Make attention causal between blocks, and the KV cache stops being an approximation. | planned |
+| P04 | Trimming the masked suffix | Hundreds of trailing masks, and the model barely looks past the first few. | planned |
+
+#### Decoding strategies
+
+| # | Note | Hook | Status |
+| --- | --- | --- | --- |
+| P05 | [Parallel decoding](https://buffett0323.github.io/learning-dllms/posts/parallel-decoding/) | How many tokens can we commit in one step? | live |
+| P06 | Draft, verify, remask | Commit aggressively, then let bidirectional context take the wrong ones back. | planned |
+| P07 | Reading the denoising trajectory | The answer often settles long before the last step. Stop there, or let the steps vote. | planned |
 
 #### Serving many requests
 
 | # | Note | Hook | Status |
 | --- | --- | --- | --- |
-| P04 | [Batching denoising steps](https://buffett0323.github.io/learning-dllms/posts/batching/) | Every request is at a different noise level. Can they share a step? | live |
-| P05 | A serving engine for dLLMs | Scheduler, cache manager, sampler: what changes from an AR engine. | planned |
+| P08 | [Batching denoising steps](https://buffett0323.github.io/learning-dllms/posts/batching/) | Every request is at a different noise level. Can they share a step? | live |
+| P09 | A serving engine for dLLMs | Scheduler, cache manager, sampler: what changes from an AR engine. | planned |
 
 ## Paper notes
 
@@ -66,6 +75,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [dLLM-Cache](https://buffett0323.github.io/learning-dllms/papers/dllm-cache/) | Adaptive prompt and response caching | text only (license) |
 | [TEAM](https://buffett0323.github.io/learning-dllms/papers/team/) | Expert activation in MoE dLLMs | on the PDF |
 | [dLLM-Serve](https://buffett0323.github.io/learning-dllms/papers/dllm-serve/) | Serving: logit memory, Refresh/Reuse scheduling, per-head sparse KV | on the PDF |
+| [Fast-dLLM v2](https://buffett0323.github.io/learning-dllms/papers/fast-dllm-v2/) | Block diffusion from Qwen2.5 with ~1B tokens; block and sub-block caches | on the PDF |
 
 <!-- ## Writing
 

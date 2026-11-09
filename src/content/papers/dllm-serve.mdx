@@ -12,6 +12,7 @@ readDate: '2026-11-01'
 import Annotation from '../../components/Annotation.astro';
 import HeadSparsity from '../../components/HeadSparsity.astro';
 import Highlight from '../../components/Highlight.astro';
+import LogitCompare from '../../components/LogitCompare.astro';
 import PhaseDiagram from '../../components/PhaseDiagram.astro';
 
 Fast-dLLM, dKV-Cache and Sparse-dLLM speed up one request. dLLM-Serve asks what breaks when a GPU serves many at once, and fixes three things:
@@ -22,11 +23,53 @@ Fast-dLLM, dKV-Cache and Sparse-dLLM speed up one request. dLLM-Serve asks what 
 
 Result: 1.61–1.81× throughput on RTX 4090 and 1.60–1.74× on L40S over the best baseline, with tail latency down almost 4× under heavy load.
 
-The two phases of §2.3, for one request (more, and how to batch them, in [P04](../../posts/batching/)):
+Logit Decomposition (§4.2–4.3), with and without. It saves memory only: the FLOPs and the outputs are the same. The memory goes to the KV pool, so more requests run at once.
+
+<LogitCompare caption="One worst-case Refresh step, 16 requests × 2048 tokens of LLaDA-8B on an L40S (48 GB, 16 GB of weights). The engine reserves this step's activation peak at startup; the rest after the weights is the KV pool, about 1.07 GB per 2048-token request. Rough estimates: layer activations are hidden states plus Q/K/V or the MLP's gate/up; the guard band and fragmentation are left out." />
+
+**Where the spike comes from.** Stack the last hidden states of all $N = BL$ positions into $H \in \mathbb{R}^{N \times d}$. The LM head multiplies them by the output embedding $W \in \mathbb{R}^{V \times d}$:
+
+$$
+Z = H W^\top \in \mathbb{R}^{N \times V}, \qquad \text{Mem}(Z) = N \cdot V \cdot s = B \cdot L \cdot V \cdot s,
+$$
+
+with $s = 2$ bytes in FP16. Three factors make it large:
+
+- **$V$ is much larger than every other width.** Per position, the hidden state has $d = 4096$ numbers, the MLP's gate and up tensors have $2 d_\text{ff} = 24{,}576$, and the logits have $V = 126{,}464$. So $Z$ is $V/d \approx 31\times$ the hidden states and $V / 2d_\text{ff} \approx 5\times$ the largest tensor inside a layer.
+- **A dLLM needs $N = BL$ rows, AR only $N = B$.** AR predicts only the next token, so $Z$ is $B \times V$: $16 \cdot 126{,}464 \cdot 2 \approx 4$ MB. A Refresh predicts every position, so $L = 2048$ times more: $16 \cdot 2048 \cdot 126{,}464 \cdot 2 \approx 8.3$ GB.
+- **It grows with $B$.** Memory is linear in $B$, so the batch that the KV pool could hold also produces the largest $Z$.
+
+**Why that costs requests.** The profiler reserves the activation peak $R$ for the life of the server, and the KV pool gets what is left:
+
+$$
+R = \max\big(\text{Mem}(Z),\ A_\text{layer}\big), \qquad
+\#\text{requests} = \left\lfloor \frac{G - W_\text{weights} - R}{\text{KV per request}} \right\rfloor .
+$$
+
+Without decomposition $R \approx BLVs = 8.3$ GB (plus the 0.27 GB hidden states), so $\lfloor (48 - 16 - 8.6) / 1.07 \rfloor = 21$. Reserving less does not help: when a full Refresh batch arrives, allocating $Z$ fails, which is an OOM. The only safe alternative is a smaller $B$.
+
+**What decomposition changes.** Each row of $Z$ depends only on its own hidden state, $z_i = W h_i$, and decoding needs only two numbers per row:
+
+$$
+\hat{x}_i = \arg\max_v z_{i,v}, \qquad c_i = \max_v \operatorname{softmax}(z_i)_v = \frac{1}{\sum_v e^{\,z_{i,v} - \max_u z_{i,u}}} .
+$$
+
+Both are per row, so the rows can be computed in any grouping. Split $H$ into chunks of $C$ = `max_num_logits` rows, $H = [H_1; \dots; H_k]$ with $k = \lceil N / C \rceil$, and for each chunk compute $Z_j = H_j W^\top$, reduce it to $(\hat{x}, c)$, and free it. Then:
+
+$$
+\text{Mem}_\text{peak} = C \cdot V \cdot s \quad (\text{for } C = 2048:\ 0.52 \text{ GB}), \qquad
+\text{FLOPs} = \sum_{j=1}^{k} 2\,C d V = 2 N d V \ \ (\text{unchanged}).
+$$
+
+The peak no longer depends on $B$ or $L$, and the results are exactly the same, not an approximation. What remains is $N \times 2$ numbers (id and confidence), a few hundred KB. Now $R = \max(CVs,\ A_\text{layer}) \approx 1.9$ GB, set by the MLP, so $\lfloor (48 - 16 - 1.9)/1.07 \rfloor = 28$ requests. Chunks smaller than $C \approx A_\text{layer} / (Vs) \approx 6{,}000$ rows save nothing more.
+
+{/* A naive implementation is often worse than 8.3 GB: `softmax(Z.float())` makes another $N \times V$ tensor in FP32, $4NV$ bytes, about 16.6 GB, on top of $Z$. Chunking caps that one as well. */}
+
+The two phases of §2.3, for one request (more, and how to batch them, in [P08](../../posts/batching/)):
 
 <PhaseDiagram caption="Rows are queries, columns are keys and values. Refresh runs every position and rewrites the cache; Reuse runs only the active block and reads the rest from the cache." />
 
-Sparse KV (§2.4, §3.3, §4.5): which context tokens each head keeps, and what that costs in memory (the concept in [P03](../../posts/sparse-kv/)).
+Sparse KV (§2.4, §3.3, §4.5): which context tokens each head keeps, and what that costs in memory (the concept in [P02](../../posts/sparse-kv/)).
 
 <HeadSparsity caption="Toy attention weights of the current block's queries over 12 context tokens, 4 heads. Head 4 looks at the brackets, which the other heads ignore. “Kept” is the share of each head's attention that lands on tokens it still has." />
 
@@ -67,7 +110,7 @@ dLLM-Serve keeps per-head selection and physically stores only the kept tokens, 
 <Highlight page={2} line={81} text="high-importance tokens." />
 
 <Annotation page={3} line={13} text="Refresh Phase. When transitioning between consecutive blocks" color="blue">
-Refresh fixes staleness: once a block is decoded, every cached K/V is out of date, so recompute all $L$. Reuse fixes cost: K/V outside the block barely change, so run only the block. Diagram at the top; costs and batching in [P04](../../posts/batching/).
+Refresh fixes staleness: once a block is decoded, every cached K/V is out of date, so recompute all $L$. Reuse fixes cost: K/V outside the block barely change, so run only the block. Diagram at the top; costs and batching in [P08](../../posts/batching/).
 </Annotation>
 
 <Annotation page={3} line={47} text="attention distribution is inherently sparse">
@@ -104,7 +147,7 @@ The paper does not define "Dynamic" here, and the dInfer paper only reports batc
 3. argmax / sample, keep the ids and confidences,
 4. drop the logits tensor, and repeat.
 
-"Releasing the buffer" is just letting that tensor go out of scope; PyTorch's allocator then hands the same memory to the next chunk. Peak memory is chunk × $V$ instead of $N \times V$ (16× smaller for a 2048-token chunk of the 32,768 above). Same FLOPs, a few more kernel launches. Step through it in [P04](../../posts/batching/#the-logit-spike).
+"Releasing the buffer" is just letting that tensor go out of scope; PyTorch's allocator then hands the same memory to the next chunk. Peak memory is chunk × $V$ instead of $N \times V$ (16× smaller for a 2048-token chunk of the 32,768 above). Same FLOPs, a few more kernel launches. Side by side at the top: once the logits are chunked, the MLP's temporary tensors set the peak instead, so chunks below about 6,000 tokens save nothing more (on these estimates). In the ablation (§6.6, Fig. 8) this was the last component added: 1.68× → 1.76× over Sparse-dLLM on OSC, 1.82× → 1.97× on Burst. Step through it in [P08](../../posts/batching/#the-logit-spike).
 </Annotation>
 
 <Highlight page={6} line={17} text="releases the temporary logit buffer before proceeding to" color="green" />

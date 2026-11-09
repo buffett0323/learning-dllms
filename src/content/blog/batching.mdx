@@ -70,7 +70,7 @@ Dropping is nothing special: the chunk's tensor goes out of scope, and PyTorch's
 The FLOPs are the same either way; the cost is a few extra kernel launches. With 2048-token chunks, the logit reservation drops from 8.3 GB to 0.5 GB, room for about seven more 2048-token requests in the KV pool.
 
 <Note kind="question">
-	Per-phase scheduling assumes the engine knows each request's phase in advance. With an adaptive policy (Elastic-Cache) the next Refresh is decided at run time. How should the scheduler plan for it? P05.
+	Per-phase scheduling assumes the engine knows each request's phase in advance. With an adaptive policy (Elastic-Cache) the next Refresh is decided at run time. How should the scheduler plan for it? P09.
 </Note>
 
 ## References

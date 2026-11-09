@@ -39,7 +39,7 @@ Tokens committed in the same step are sampled **independently**, each from its o
 
 <ParallelDemo caption="A toy model whose joint only allows the two real cities. Sample a few times, then drag the slider." />
 
-The risk depends on confidence, so a fixed $k$ is a blunt tool. A **confidence threshold** adapts it: commit every position whose top probability exceeds $\tau$ (at least one per step). Sure stretches go fast, torn ones slow down. Fast-dLLM proves when this matches sequential decoding ([my paper notes](../../papers/fast-dllm/)); P02 goes deeper.
+The risk depends on confidence, so a fixed $k$ is a blunt tool. A **confidence threshold** adapts it: commit every position whose top probability exceeds $\tau$ (at least one per step). Sure stretches go fast, torn ones slow down. Fast-dLLM proves when this matches sequential decoding ([my paper notes](../../papers/fast-dllm/)); P05 goes deeper.
 
 ## Semi-autoregressive blocks
 

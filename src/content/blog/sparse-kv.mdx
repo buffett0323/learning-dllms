@@ -24,7 +24,7 @@ $$
 S_{h,j} = \max_{m \in [j - w/2,\ j + w/2]} Q_{b,h} \cdot K_{m,h}^\top
 $$
 
-Then it keeps the top $k$ tokens and evicts the rest, with $k = rL$. The **retention ratio** $r$ is the fraction of the $L$ context tokens kept, so the cache shrinks to $r$ times its dense size. The scores are recomputed at every Refresh (P04), when all K/V are fresh anyway.
+Then it keeps the top $k$ tokens and evicts the rest, with $k = rL$. The **retention ratio** $r$ is the fraction of the $L$ context tokens kept, so the cache shrinks to $r$ times its dense size. The scores are recomputed at every Refresh (P08), when all K/V are fresh anyway.
 
 ## One set, or one per head
 
