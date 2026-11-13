@@ -33,7 +33,7 @@ These run on full-attention dLLMs like LLaDA and Dream as they are.
 
 **dLLM-Cache** (ICML 2026, [notes](../../papers/dllm-cache/)). Caches K, V, attention and FFN outputs per layer, split by role: the prompt is refreshed rarely, the response often. Between full refreshes it recomputes only the 25% of response tokens whose value vectors changed most (**V-verify**). Up to 9.1× fewer FLOPs.
 
-**Elastic-Cache** (ICLR 2026, [arXiv](https://arxiv.org/abs/2510.14973)). Makes refresh adaptive instead of periodic. *When:* track the decoded token that gets the most attention; if its attention pattern drifts past a threshold, refresh. *Where:* only from the layer that drifted upward, since deeper layers drift more; shallow layers keep their cache. Masks far to the right keep their cache too, since they get little attention. Up to 45.1× on long GSM8K generations.
+**Elastic-Cache** (ICLR 2026, [notes](../../papers/elastic-cache/)). Makes refresh adaptive instead of periodic. *When:* track the decoded token that gets the most attention; if its attention pattern drifts past a threshold, refresh. *Where:* only from the layer that drifted upward, since deeper layers drift more; shallow layers keep their cache. Masks far to the right keep their cache too, since they get little attention. Up to 45.1× on long GSM8K generations.
 
 ## Make the cache exact (change the model)
 
