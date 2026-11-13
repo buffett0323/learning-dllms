@@ -1,0 +1,75 @@
+---
+title: 'Attention Is All You Need for KV Cache in Diffusion LLMs (Elastic-Cache)'
+authors: 'Quan Nguyen-Tri, Mukul Ranjan, Zhiqiang Shen'
+venue: 'arXiv'
+year: 2025
+pdf: 'elastic-cache.pdf'
+url: 'https://arxiv.org/abs/2510.14973'
+license: 'CC BY 4.0'
+hook: 'Refresh the cache only when the most-attended token moves, and only from that layer down. Masks far to the right stay cached.'
+readDate: '2026-11-13'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import ElasticCacheDemo from '../../components/ElasticCacheDemo.astro';
+import Highlight from '../../components/Highlight.astro';
+
+{/* A training-free cache for full-attention dLLMs (LLaDA, LLaDA-1.5, LLaDA-V).  */}
+Earlier caches refresh on a fixed schedule: Fast-dLLM at each block, dKV-Cache every $N$ steps. Elastic-Cache decides adaptively:
+
+- **Where to predict**: a sliding window of the $\beta$ leftmost masks. Masks further right keep their cached K/V.
+- **When to refresh**: when the attention of the most-attended token changes (cosine similarity $< \gamma$).
+- **Which layers**: only from the layer where that change shows up, down to the last. Shallow layers keep their cache.
+
+{/* Result: up to 8.7× over LLaDA on GSM8K (256 tokens) and 45.1× on longer outputs, at accuracy equal to or above the baseline. */}
+
+Algorithm 1, step by step. Drag γ to see refreshes come and go, and switch the far masks to recomputed for the ablation of Table 15.
+
+<ElasticCacheDemo caption="Toy run: 4 prompt tokens, 16 answer positions, 8 layers, window β = 4. Each row is a layer, each column a position. Only the window, the tokens decoded last step and the watched ★ token run as queries. The σ column is the cosine similarity of ★'s attention row to last step's, per layer. The first layer below γ (dashed) triggers a recompute of everything below it. Drift values are made up; their shape follows Fig. 1: larger in deeper layers, and spiking after a content word such as Paris is decoded." />
+
+<Annotation page={1} line={17} text="the most-attended token exhibits the smallest KV drift" color="blue">
+**The most-attended token** is the already-decoded token that the window's masks look at most. At step $t$ and layer $l$, take the attention matrix from the window queries $q \in M^t_\beta$ to all keys. For each decoded token $k$ (the prompt counts as decoded), add up its column, then take the largest (Eq. 6, p.5):
+
+$$
+T^{t,l} = \arg\max_{k \in D^{<t}} \sum_{q \in M^t_\beta} S^{t,l}[q, k]
+$$
+
+There is one per layer. Their union $T^t$ is small, because layers often pick the same token.
+
+**What it is used for.** It is the refresh trigger:
+
+1. At the next step, $T^{t-1}$ is added to the query set, next to the window. Its own attention row is recomputed while every other cached token is reused.
+2. Compare its attention row with the one from the previous step (cosine similarity $\sigma^{t,l}$).
+3. If $\sigma^{t,l} < \gamma$ at layer $l$, recompute **all** tokens from layer $l+1$ to the last layer. Otherwise, keep reusing the cache.
+
+**Why this token.** It matters most for the predictions, and it drifts **least** of all decoded tokens (Fig. 1d). So if even it has moved, the others have moved too. Checking it costs less than 0.5% of attention (Table 13).
+
+The flip side: a token that drifts least is a trigger that fires late. Others may already have drifted while it has not. $\gamma = 0.9$ is set high to make up for that, and the $\gamma$ ablation (Table 7) is the speed–accuracy dial.
+</Annotation>
+
+<Highlight page={5} line={43} text="we determine the token that receives the most frequent attention from other" color="blue" />
+
+<Annotation page={2} line={10} text="can be block-cached outside the active prediction window" color="green">
+**The active prediction window** is the $\beta$ masked positions furthest to the left: $M^t_\beta = M^t[1{:}\beta]$, with $\beta = 16$ or $32$ by default (§3.2). Only these positions are predicted at a step. Only they, plus the most-attended tokens, run as queries.
+
+**Outside** means every mask to the right of the window. Their K/V are not recomputed. The values from the last refresh stay in the cache and are only read as keys and values. That is what **block-cached** means here: the whole tail of masks is set aside and reused as one chunk, and not tracked token by token.
+
+**Why this is safe** (Fig. 1a): masks attend strongly to masks nearby and barely to far ones. A far mask carries no content. It mainly tells the model "the answer goes on for this long", a **length bias**. That signal hardly changes from step to step, so a stale copy is good enough.
+
+The window **slides**: once its leftmost masks are decoded, the next masks from the cached tail move in and are computed again.
+</Annotation>
+
+<Highlight page={4} line={44} text="tokens within the sliding window attend closely to one another, while those outside receive little" color="green" />
+
+<Annotation page={2} line={39} text="We develop block-wise MASK caching to eliminate needless updates outside the prediction" color="green">
+**Block-wise MASK caching** is the mechanism behind the previous note, named as a contribution: do not recompute the masks outside the window, cache them. It differs from Fast-dLLM's DualCache, which also caches the masks after the current block, in **where the cut falls**:
+
+- **DualCache**: blocks are fixed. In the current block, every position outside it is frozen, even the masks just past its right edge. Those are the ones the last positions in the block depend on most.
+- **Elastic-Cache**: the window moves with decoding, so the nearest masks are always inside it and computed. Only masks that are far away are frozen.
+
+The cached tail is refreshed together with everything else when the drift test fires. Then layers $l+1$ to $L$ recompute every position, the tail included.
+
+**What it buys** (Table 15, GSM8K at 512 tokens, LLaDA-1.5): with $\beta = 16$, 82.7 → 119.8 tokens/s, accuracy 80.6 → 81.4. Peak memory also drops (Table 12). Fig. 3a shows switching to Fast-dLLM-style blocks hurts accuracy at small block sizes.
+
+The paper does not define "block" precisely. Its only number is "cache block size 32" in §4.1. My reading: the tail is cached and refreshed as whole chunks, not mask by mask.
+</Annotation>
