@@ -59,6 +59,7 @@ export const tracks: Track[] = [
 				notes: [
 					{ slug: 'kv-cache', title: 'Caching without causality', hook: 'Bidirectional attention breaks the KV cache. Mostly.' },
 					{ slug: 'sparse-kv', title: 'Keeping fewer tokens', hook: 'Most keys get almost no attention. Which ones can each head drop?' },
+					// P03 sources: BD3-LM, Fast-dLLM v2, SDAR (exact cache across blocks); D2F (pipelined blocks over the exact cache).
 					{ slug: 'block-cache', title: 'An exact cache again', hook: 'Make attention causal between blocks, and the KV cache stops being an approximation.' },
 					// P04 sources: DPad (trim the suffix); Elastic-Cache (far masks act as a length bias, so keep them block-cached
 					// outside a sliding window, Table 15). Compare the two when writing it.

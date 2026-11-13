@@ -1,0 +1,278 @@
+---
+// D2F training (Algorithm 1, Figure 3): asymmetric distillation on blocks with monotonically increasing
+// mask ratios. Pick a target block i: the student (block-causal) predicts its masks from the *noisy* blocks
+// <= i; the teacher (the pre-trained full-attention dLLM) predicts them from all noisy blocks; the loss is
+// KL(student || teacher) on the masked tokens. A third row shows block diffusion's teacher forcing for
+// contrast: there, earlier blocks are clean.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const words = ['dLLMs', 'are', 'a', 'new', 'kind', 'of', 'model', 'that', 'mix', 'two', 'ideas', ':', 'AR', 'and', 'diffusion', '.'];
+const k = 4;
+// Masked offsets per block: more masks in later blocks (t1 < t2 < t3 < t4).
+const masked = [[2], [0, 3], [0, 1, 3], [0, 1, 2, 3]];
+const nb = words.length / k;
+const rows = [
+	{ id: 'teacher', name: 'Teacher', who: 'pre-trained dLLM, full attention (frozen)' },
+	{ id: 'student', name: 'Student', who: 'D2F, block-causal attention' },
+	{ id: 'bd', name: 'For contrast', who: 'block diffusion: teacher forcing, clean prefix' },
+];
+---
+
+<figure class="d2t" data-d2t data-config={JSON.stringify({ nb })}>
+	<div class="d2t-controls">
+		<span>target block</span>
+		<div class="d2t-seg" role="radiogroup" aria-label="Target block">
+			{
+				Array.from({ length: nb }, (_, b) => (
+					<button type="button" role="radio" aria-checked={b === 2 ? 'true' : 'false'} data-target={b}>
+						{b + 1}
+					</button>
+				))
+			}
+		</div>
+	</div>
+	<div class="d2t-scroll">
+		<div class="d2t-grid" style={`--n:${words.length}`}>
+			<span></span>
+			{Array.from({ length: nb }, (_, b) => <span class="d2t-bh" style={`grid-column: span ${k}`}>block {b + 1} · t{b + 1}</span>)}
+			{
+				rows.map((r) => [
+					<span class:list={['d2t-who', r.id]}>
+						<b>{r.name}</b>
+						<small>{r.who}</small>
+					</span>,
+					...words.map((w, g) => {
+						const b = Math.floor(g / k);
+						const isMask = masked[b].includes(g % k);
+						return (
+							<span class:list={['d2t-c', r.id, { m: isMask }]} data-b={b} data-clean-tok={w}>
+								{isMask ? '' : w}
+							</span>
+						);
+					}),
+				])
+			}
+		</div>
+	</div>
+	<p class="d2t-note" data-note></p>
+	<p class="d2t-legend" aria-hidden="true">
+		<span><i class="sw see"></i>visible context</span>
+		<span><i class="sw tgt"></i>target block: KL on its masks</span>
+		<span><i class="sw hide"></i>not visible</span>
+		<span><i class="sw m"></i>[MASK]</span>
+	</p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	document.querySelectorAll<HTMLElement>('[data-d2t]').forEach((fig) => {
+		const cellsOf = (row: string) => [...fig.querySelectorAll<HTMLElement>(`.d2t-c.${row}`)];
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		function render(i: number) {
+			for (const row of ['teacher', 'student', 'bd']) {
+				cellsOf(row).forEach((el) => {
+					const b = Number(el.dataset.b);
+					el.classList.remove('see', 'tgt', 'hide', 'cleaned');
+					if (b === i) el.classList.add('tgt');
+					else if (row === 'teacher' || b < i) el.classList.add('see');
+					else el.classList.add('hide');
+					// Teacher forcing: earlier blocks are given clean.
+					if (row === 'bd' && b < i && el.classList.contains('m')) {
+						el.classList.add('cleaned');
+						el.textContent = el.dataset.cleanTok!;
+					} else if (el.classList.contains('m')) el.textContent = '';
+				});
+			}
+			const n = i + 1;
+			note.textContent =
+				`Target block ${n}. The teacher predicts its masks from all ${fig.querySelectorAll('.d2t-bh').length} noisy blocks, later ones included. ` +
+				`The student sees only blocks 1–${n}, and ${n > 1 ? `blocks 1–${n - 1} are still partly masked` : 'block 1 has only the prompt before it'}: it learns to continue from an unfinished prefix. ` +
+				`That is the "forcing". Block diffusion gives the earlier blocks clean (underlined), so its model never learns to start a block before the previous one is done.`;
+		}
+		fig.querySelectorAll<HTMLButtonElement>('[data-target]').forEach((btn) =>
+			btn.addEventListener('click', () => {
+				fig.querySelectorAll('[data-target]').forEach((b) => b.setAttribute('aria-checked', String(b === btn)));
+				render(Number(btn.dataset.target));
+			}),
+		);
+		fig.classList.add('ready');
+		render(2);
+	});
+</script>
+
+<style>
+	.d2t {
+		--c-see: #2f6fb3;
+		--c-tgt: #c2410c;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .d2t {
+		--c-see: #4f8fd6;
+		--c-tgt: #e06a2c;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .d2t {
+			--c-see: #4f8fd6;
+			--c-tgt: #e06a2c;
+		}
+	}
+	.d2t:not(.ready) {
+		display: none;
+	}
+	.d2t-controls {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+		font-family: var(--mono);
+		font-size: 0.76rem;
+		color: var(--muted);
+	}
+	.d2t-seg {
+		display: inline-flex;
+		padding: 3px;
+		gap: 2px;
+		border-radius: 8px;
+		background: var(--code-bg);
+	}
+	.d2t-seg button {
+		min-width: 2rem;
+		padding: 0.3rem 0.6rem;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		color: var(--muted);
+		font: inherit;
+		cursor: pointer;
+	}
+	.d2t-seg button[aria-checked='true'] {
+		background: var(--surface);
+		color: var(--fg);
+		box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+	}
+	.d2t-scroll {
+		overflow-x: auto;
+		margin-top: 1rem;
+	}
+	.d2t-grid {
+		display: grid;
+		grid-template-columns: 8.5rem repeat(var(--n), minmax(1.9rem, 1fr));
+		gap: 3px 2px;
+		min-width: 40rem;
+		align-items: center;
+	}
+	.d2t-bh {
+		padding-bottom: 0.2rem;
+		border-bottom: 2px solid var(--line);
+		text-align: center;
+		font-family: var(--mono);
+		font-size: 0.64rem;
+		color: var(--muted);
+	}
+	.d2t-who {
+		display: grid;
+		padding-right: 0.5rem;
+		line-height: 1.25;
+	}
+	.d2t-who b {
+		font-family: var(--mono);
+		font-size: 0.72rem;
+	}
+	.d2t-who small {
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.d2t-who.bd {
+		opacity: 0.75;
+	}
+	.d2t-c {
+		height: 1.9rem;
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		border-radius: 3px;
+		font-family: var(--mono);
+		font-size: 0.55rem;
+		white-space: nowrap;
+		background: var(--code-bg);
+		transition:
+			background-color 0.25s,
+			opacity 0.25s;
+	}
+	.d2t-c.bd {
+		margin-top: 0.6rem;
+	}
+	.d2t-c.see {
+		background: color-mix(in srgb, var(--c-see) 22%, var(--surface));
+	}
+	.d2t-c.tgt {
+		background: color-mix(in srgb, var(--c-tgt) 26%, var(--surface));
+	}
+	.d2t-c.hide {
+		opacity: 0.3;
+	}
+	.d2t-c.m {
+		background-image: repeating-linear-gradient(-45deg, transparent 0 3px, rgb(0 0 0 / 0.14) 3px 4px);
+	}
+	.d2t-c.m.tgt {
+		box-shadow: inset 0 0 0 1.5px var(--c-tgt);
+	}
+	.d2t-c.cleaned {
+		background-image: none;
+		text-decoration: underline;
+		text-decoration-color: var(--c-see);
+		text-underline-offset: 2px;
+	}
+	.d2t-note {
+		margin: 0.8rem 0 0;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	.d2t-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 0.6rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.d2t-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.9rem;
+		height: 0.9rem;
+		border-radius: 3px;
+	}
+	.sw.see {
+		background: color-mix(in srgb, var(--c-see) 22%, var(--surface));
+	}
+	.sw.tgt {
+		background: color-mix(in srgb, var(--c-tgt) 26%, var(--surface));
+	}
+	.sw.hide {
+		background: var(--code-bg);
+		opacity: 0.4;
+	}
+	.sw.m {
+		background: repeating-linear-gradient(-45deg, var(--surface) 0 3px, rgb(0 0 0 / 0.15) 3px 4px);
+		border: 1px solid var(--line);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+</style>

@@ -1,0 +1,73 @@
+---
+title: 'Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing (D2F)'
+authors: 'Xu Wang, Chenkai Xu, Yijie Jin, Jiachun Jin, Hao Zhang, Zhijie Deng'
+venue: 'arXiv'
+year: 2025
+pdf: 'd2f.pdf'
+url: 'https://arxiv.org/abs/2508.09192'
+license: 'CC BY 4.0'
+hook: 'Distill a full-attention dLLM into a block-causal one that can start the next block before the last one is done.'
+readDate: '2026-11-13'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import D2FPipeline from '../../components/D2FPipeline.astro';
+import D2FTrain from '../../components/D2FTrain.astro';
+import Highlight from '../../components/Highlight.astro';
+
+Block diffusion (M08) gives an exact KV cache, but blocks run one after another. D2F keeps the block-causal mask and adds **inter-block parallelism**: the next block starts while the previous one is still being decoded. Two parts:
+
+- **Training** (§4.1–4.2): turn LLaDA or Dream into a block-causal model by distillation. The new part is that each block learns to denoise from **partly masked** earlier blocks, not clean ones. That is the "forcing".
+- **Inference** (§4.3): a pipeline of active blocks. A new block is appended once the last one is partly decoded, and it becomes fully active once its predecessor is nearly done.
+
+**What "forcing" means.** In **teacher forcing**, the usual way to train AR models and block diffusion, each block is fed a clean prefix. **Diffusion forcing** (Chen et al., 2024, from video) feeds a noised one: masks rise from left to right, so earlier blocks are partly masked, but less than the current one. That is exactly what the pipeline looks like at inference, so the next block can start before the previous one is finished. A teacher-forced model has never seen an unfinished prefix, so it has to wait.
+
+{/* Result: D2F-Dream-7B reaches 119.9 tokens/s on GSM8K, 2.5× LLaMA3-8B. Against vanilla LLaDA, the speedup is up to 52.9× (MBPP) at a similar score. */}
+
+**Training.** Pick a target block. The student sees only the blocks up to it, and those are still noisy. Compare with block diffusion, which gives the earlier blocks clean.
+
+<D2FTrain caption="Blocks are masked more and more from left to right (t1 < t2 < t3 < t4). The student (block-causal) must match the teacher (full attention, frozen) on the masked tokens of the target block, but sees only blocks up to it, with their masks still in. Block diffusion's teacher forcing would show it a clean prefix instead." />
+
+**Inference.** Step through Algorithm 2 and compare with decoding one block at a time.
+
+<D2FPipeline caption="4 blocks of 6 tokens, one row per step. A new block is appended, semi-activated, once the last block passes τ_add. It becomes fully activated once its predecessor passes τ_act. Finished blocks are cached exactly and never recomputed. Toy confidence: a fully activated block commits one token per step, a semi-activated one every other step. In the paper, fully activated blocks commit every token above τ_conf, often several per step." />
+
+<Annotation page={5} line={32} text="D2F trains the model to perform conditional denoising of the current block based on a partially denoised prefix" color="blue">
+**Is D2F distillation into block-causal attention?** Half of it. There are two separate ideas:
+
+1. **Block-causal attention, via distillation (§4.2).** The student starts as a copy of the teacher, LLaDA or Dream. The only architectural change is the attention mask: full → block-causal. It is trained to match the teacher's predictions with a KL loss. This gives the exact KV cache. Fast-dLLM v2 and SDAR get the same mask from an AR model with a plain denoising loss. Distilling from a dLLM is D2F's route, and it is cheap: LoRA, 17k samples, 12 hours on 8 A100s.
+2. **Forcing (§4.1).** Each block gets its own noise level, increasing left to right ($t_1 < \dots < t_N$, masked 30% → 70%). So block $i$ is always predicted from earlier blocks that are **still partly masked**. Block diffusion (BD3-LM) uses teacher forcing instead: the earlier blocks are clean. A model trained that way has never seen an unfinished prefix, so at inference it has to wait for the previous block to finish.
+
+Idea 1 alone is block diffusion, distilled. Idea 2 is what allows the pipeline in §4.3. The name comes from **Diffusion Forcing** (Chen et al., 2024), the same trick for video, where each frame gets its own noise level.
+</Annotation>
+
+<Highlight page={5} line={30} text="naive teacher-forcing training, as employed in block diffusion (Arriola et al., 2025), cannot lead to the second capability" color="blue" />
+
+<Annotation page={6} line={29} text="represents the KL divergence aggregated over the mask tokens" color="green">
+**Why "asymmetric".** Both models get the same noisy sequence. They differ in what they may look at:
+
+- **Teacher**: full attention over **all** noisy blocks, later ones included.
+- **Student**: block $i$ sees only blocks $1..i$.
+
+So the student must learn to predict as well as the teacher without seeing the later blocks. The loss is computed only on masked tokens, summed over blocks.
+
+Distilling, and not training on the ground truth, is what keeps the run small. The student inherits the teacher's ability to fill masks and only has to adapt to the new mask.
+</Annotation>
+
+<Annotation page={6} line={41} text="we maintain a sliding window of active blocks and dynamically append" color="pink">
+**Pipelined decoding**, Algorithm 2. There are three thresholds:
+
+- $\tau_\text{add}$ (default 0.1): when the last block is this fraction decoded, append a new, fully masked block.
+- $\tau_\text{act}$ (default 0.95): when a block's predecessor is this fraction decoded, the block switches from **semi-activated** to **fully activated**.
+- $\tau_\text{conf}$ (default 0.9): commit tokens above this confidence. A semi-activated block commits only those, and it may commit nothing. A fully activated block also commits its most confident token when none passes the threshold, as in Fast-dLLM.
+
+Each step is one forward pass over all active blocks. Finished blocks come from the KV cache. Their K/V are exact, because a finished block attends only to itself and earlier blocks, and none of those change again.
+
+Why two states: a new block sees only a very incomplete prefix, so decoding it aggressively hurts quality. A semi-activated block takes only the tokens it is sure of, and speeds up once the context is nearly settled.
+</Annotation>
+
+<Highlight page={2} line={45} text="we constrain the attention to be block-wise causal to ensure the KV cache remains accurate" color="green" />
+
+<Annotation page={7} line={9} text="D2F-LLaDA 52.5 (7.3x) 2.8 (11.5x) 144" color="yellow">
+Read the speedups with the **Gen. Length** column. On GSM8K, D2F-LLaDA writes 144 tokens against about 231 for the others. So latency improves 11.5×, while throughput improves only 7.3×. Throughput (tokens/s) is the fairer number. On Dream (Table 2), the lengths match.
+</Annotation>

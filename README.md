@@ -77,6 +77,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [dLLM-Serve](https://buffett0323.github.io/learning-dllms/papers/dllm-serve/) | Serving: logit memory, Refresh/Reuse scheduling, per-head sparse KV | on the PDF |
 | [Fast-dLLM v2](https://buffett0323.github.io/learning-dllms/papers/fast-dllm-v2/) | Block diffusion from Qwen2.5 with ~1B tokens; block and sub-block caches | on the PDF |
 | [Elastic-Cache](https://buffett0323.github.io/learning-dllms/papers/elastic-cache/) | Attention-triggered, layer-aware cache refresh; sliding window with cached far masks | on the PDF |
+| [D2F](https://buffett0323.github.io/learning-dllms/papers/d2f/) | Distill a block-causal dLLM that decodes from unfinished blocks; pipelined parallel decoding | on the PDF |
 
 <!-- ## Writing
 

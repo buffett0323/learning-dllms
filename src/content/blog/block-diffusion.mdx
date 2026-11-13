@@ -71,8 +71,21 @@ For larger blocks, BD3-LM samples the mask rate from a **clipped** range $U[\bet
 ## What it costs
 
 - **Context on the right.** A token sees the rest of its block, but never later blocks. Full attention can revise early text in light of later text; block diffusion cannot.
-- **Blocks run in sequence.** Parallelism exists only inside a block. With small blocks, decoding is close to AR in the number of forward passes. D2F pipelines blocks to win some of this back.
+- **Blocks run in sequence.** Parallelism exists only inside a block. With small blocks, decoding is close to AR in the number of forward passes. The cause is in training, not in the mask (see below).
 - **The current block.** Inside it, attention is still bidirectional, so a cache within the block is again approximate. Fast-dLLM v2 adds DualCache at the sub-block level for this.
+
+## Teacher forcing vs. diffusion forcing
+
+Why must block $b+1$ wait for block $b$? Because of how BD3-LM trains. The noisy block always conditions on **clean** earlier blocks, the $x_0$ half of $[x_t, x_0]$. This is **teacher forcing**: the model never sees an unfinished prefix, so at inference the prefix must be finished first.
+
+**D2F** ([my notes](../../papers/d2f/)) keeps the block-causal mask and changes the training input. Every block is noisy, with mask ratios rising from left to right ($t_1 < t_2 < \dots$). So block $b$ learns to denoise from earlier blocks that are **still partly masked**. This is **diffusion forcing**, a name borrowed from video models, where each frame gets its own noise level. At inference, D2F appends a new block once the last one is only partly decoded and decodes several blocks in one forward pass. Finished blocks are still cached exactly.
+
+| | Earlier blocks during training | At inference, block $b+1$ starts |
+|---|---|---|
+| Block diffusion (BD3-LM, Fast-dLLM v2) | clean | when block $b$ is finished |
+| D2F | noisy, less masked than block $b$ | when block $b$ is partly decoded |
+
+D2F gets its block-causal model by distillation from LLaDA or Dream, and not from an AR checkpoint. That is a separate choice from the forcing.
 
 ## Who uses it
 
@@ -86,3 +99,4 @@ The larger recent dLLMs are block diffusion models converted from AR checkpoints
 4. Cheng et al. *SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation*. 2025.
 5. Bie et al. *LLaDA2.0: Scaling Up Diffusion Language Models to 100B*. 2025.
 6. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025.
+7. Chen et al. *Diffusion Forcing: Next-token Prediction Meets Full-Sequence Diffusion*. NeurIPS 2024.

@@ -1,0 +1,426 @@
+---
+// D2F pipelined parallel decoding (Algorithm 2, Figure 4) on a toy run: 4 blocks of 6 tokens.
+// Rules per step: (1) if the last block's decoded ratio >= tau_add, append a new semi-activated block;
+// (2) one forward pass over the active blocks (finished blocks come from an exact KV cache); a fully-activated
+// block commits at least one token, a semi-activated block only commits tokens above tau_conf; (3) a semi block
+// whose predecessor reached tau_act becomes fully activated; (4) finished blocks are written to the cache.
+// Toy confidence: a fully-activated block commits 1 token per step, a semi-activated one every other step.
+// "One block at a time" is block diffusion / Fast-dLLM v2 style: the next block starts when the last finishes.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const words = ['A', 'dLLM', 'can', 'write', 'many', 'words', 'at', 'once', ',', 'and', 'with', 'an', 'exact', 'cache', 'it', 'can', 'beat', 'AR', 'on', 'speed', 'in', 'real', 'use', '.'];
+const k = 6;
+// Order in which positions inside a block get committed (by confidence, not left to right).
+const order = [0, 1, 3, 2, 5, 4];
+---
+
+<figure class="d2f" data-d2f data-config={JSON.stringify({ words, k, order })}>
+	<div class="d2f-controls">
+		<div class="d2f-seg" role="radiogroup" aria-label="Schedule">
+			<button type="button" role="radio" aria-checked="true" data-mode="d2f">D2F pipeline</button>
+			<button type="button" role="radio" aria-checked="false" data-mode="seq">One block at a time</button>
+		</div>
+		<label class="d2f-sel">τ<sub>add</sub>
+			<select data-tadd>
+				<option value="1">1/6</option>
+				<option value="2" selected>2/6</option>
+				<option value="3">3/6</option>
+			</select>
+		</label>
+		<label class="d2f-sel">τ<sub>act</sub>
+			<select data-tact>
+				<option value="4">4/6</option>
+				<option value="5" selected>5/6</option>
+				<option value="6">6/6</option>
+			</select>
+		</label>
+		<div class="d2f-buttons">
+			<button class="btn icon" type="button" data-act="reset" aria-label="Reset">↺</button>
+			<button class="btn icon" type="button" data-act="prev" aria-label="Previous step">‹</button>
+			<button class="btn icon" type="button" data-act="next" aria-label="Next step">›</button>
+			<button class="btn" type="button" data-act="all">All</button>
+		</div>
+	</div>
+
+	<div class="d2f-scroll">
+		<div class="d2f-head" style={`--n:${words.length}`}>
+			<span></span>
+			{Array.from({ length: words.length / k }, (_, b) => <span style={`grid-column: span ${k}`}>block {b + 1}</span>)}
+			<span>+tok</span>
+		</div>
+		<div class="d2f-rows" data-rows style={`--n:${words.length}`}></div>
+	</div>
+
+	<p class="d2f-legend" aria-hidden="true">
+		<span><i class="sw semi"></i>semi-activated: commits only confident tokens</span>
+		<span><i class="sw full"></i>fully activated: commits ≥ 1 token per step</span>
+		<span><i class="sw fresh">a</i>committed this step</span>
+		<span><i class="sw cache"></i>finished block, exact KV cache</span>
+	</p>
+	<p class="d2f-note" data-note></p>
+	<div class="d2f-totals" data-totals></div>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	type Mode = 'd2f' | 'seq';
+	type State = 'semi' | 'full';
+	interface Snap {
+		states: (State | 'done' | null)[]; // per block, during this step
+		done: number[]; // decoded count per block after this step
+		fresh: Set<number>; // global positions committed this step
+		events: string[];
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-d2f]').forEach((fig) => {
+		const { words, k, order } = JSON.parse(fig.dataset.config!) as { words: string[]; k: number; order: number[] };
+		const nb = words.length / k;
+		let mode: Mode = 'd2f';
+		let tadd = 2;
+		let tact = 5;
+		let shown = 0;
+
+		function simulate(m: Mode, add: number, act: number): Snap[] {
+			const blocks: { done: number; state: State; age: number; finished: boolean }[] = [{ done: 0, state: 'full', age: 0, finished: false }];
+			const snaps: Snap[] = [];
+			for (let step = 1; step < 200; step++) {
+				const events: string[] = [];
+				const last = blocks[blocks.length - 1];
+				const i = blocks.length;
+				if (blocks.length < nb) {
+					if (m === 'd2f' && last.done >= add) {
+						blocks.push({ done: 0, state: 'semi', age: 0, finished: false });
+						events.push(`Block ${i} passed τ_add (${last.done}/${k} decoded), so block ${i + 1} is appended, semi-activated.`);
+					} else if (m === 'seq' && last.done === k) {
+						blocks.push({ done: 0, state: 'full', age: 0, finished: false });
+						events.push(`Block ${i} is finished, so block ${i + 1} starts.`);
+					}
+				}
+				const states: Snap['states'] = Array.from({ length: nb }, (_, b) => (b < blocks.length ? (blocks[b].finished ? 'done' : blocks[b].state) : null));
+				const fresh = new Set<number>();
+				blocks.forEach((b, bi) => {
+					if (b.finished) return;
+					const n = Math.min(b.state === 'full' ? 1 : b.age % 2, k - b.done);
+					for (let j = 0; j < n; j++) fresh.add(bi * k + order[b.done + j]);
+					b.done += n;
+					b.age++;
+				});
+				blocks.forEach((b, bi) => {
+					if (bi > 0 && b.state === 'semi' && blocks[bi - 1].done >= act) {
+						b.state = 'full';
+						events.push(`Block ${bi} reached τ_act, so block ${bi + 1} becomes fully activated.`);
+					}
+				});
+				blocks.forEach((b, bi) => {
+					if (!b.finished && b.done === k) {
+						b.finished = true;
+						events.push(`Block ${bi + 1} is complete: its K/V are written to the cache and never recomputed.`);
+					}
+				});
+				snaps.push({ states, done: blocks.map((b) => b.done).concat(Array(nb - blocks.length).fill(0)), fresh, events });
+				if (blocks.length === nb && blocks.every((b) => b.finished)) break;
+			}
+			return snaps;
+		}
+
+		const rowsEl = fig.querySelector<HTMLElement>('[data-rows]')!;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		const totals = fig.querySelector<HTMLElement>('[data-totals]')!;
+
+		function render() {
+			const snaps = simulate(mode, tadd, tact);
+			shown = Math.min(shown, snaps.length);
+			const committed = new Set<number>();
+			let html = '';
+			for (let s = 0; s < shown; s++) {
+				const sn = snaps[s];
+				sn.fresh.forEach((g) => committed.add(g));
+				const cells = words
+					.map((w, g) => {
+						const b = Math.floor(g / k);
+						const st = sn.states[b];
+						if (st === null) return `<span class="c none"></span>`;
+						if (st === 'done') return `<span class="c cache">${w}</span>`;
+						const isTok = committed.has(g);
+						const cls = ['c', st, isTok ? 'tok' : 'mask', sn.fresh.has(g) ? 'fresh' : ''].join(' ');
+						return `<span class="${cls}">${isTok ? w : ''}</span>`;
+					})
+					.join('');
+				html += `<span class="lab">${s + 1}</span>${cells}<span class="plus">+${sn.fresh.size}</span>`;
+			}
+			rowsEl.innerHTML = html;
+
+			if (shown === 0) {
+				note.textContent =
+					mode === 'd2f'
+						? `Start: only block 1, fully activated. A new block is appended as soon as the last one passes τ_add, long before it is finished.`
+						: `Start: only block 1. Each block must be finished before the next one starts, as in block diffusion and Fast-dLLM v2.`;
+			} else {
+				const sn = snaps[shown - 1];
+				const active = sn.states.filter((x) => x === 'semi' || x === 'full').length;
+				note.textContent = `Step ${shown}: one forward pass over ${active} active block${active > 1 ? 's' : ''}; finished blocks come from the cache. ${sn.events.join(' ')}`;
+			}
+
+			const d = simulate('d2f', tadd, tact).length;
+			const q = simulate('seq', tadd, tact).length;
+			totals.innerHTML =
+				`<div class="${mode === 'seq' ? 'on' : ''}"><span>One block at a time</span><b>${q}</b><small>steps for ${words.length} tokens</small></div>` +
+				`<div class="${mode === 'd2f' ? 'on' : ''}"><span>D2F pipeline</span><b>${d}</b><small>steps · ${(q / d).toFixed(2)}× fewer forward passes</small></div>`;
+			(fig.querySelector('[data-act="prev"]') as HTMLButtonElement).disabled = shown === 0;
+			(fig.querySelector('[data-act="reset"]') as HTMLButtonElement).disabled = shown === 0;
+			(fig.querySelector('[data-act="next"]') as HTMLButtonElement).disabled = shown >= snaps.length;
+			(fig.querySelector('[data-act="all"]') as HTMLButtonElement).disabled = shown >= snaps.length;
+			fig.querySelectorAll<HTMLSelectElement>('select').forEach((sel) => (sel.disabled = mode === 'seq'));
+		}
+
+		fig.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) =>
+			btn.addEventListener('click', () => {
+				mode = btn.dataset.mode as Mode;
+				fig.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-checked', String(b === btn)));
+				render();
+			}),
+		);
+		fig.querySelector<HTMLSelectElement>('[data-tadd]')!.addEventListener('change', (e) => ((tadd = Number((e.target as HTMLSelectElement).value)), render()));
+		fig.querySelector<HTMLSelectElement>('[data-tact]')!.addEventListener('change', (e) => ((tact = Number((e.target as HTMLSelectElement).value)), render()));
+		fig.querySelector('[data-act="next"]')!.addEventListener('click', () => ((shown += 1), render()));
+		fig.querySelector('[data-act="prev"]')!.addEventListener('click', () => ((shown = Math.max(0, shown - 1)), render()));
+		fig.querySelector('[data-act="reset"]')!.addEventListener('click', () => ((shown = 0), render()));
+		fig.querySelector('[data-act="all"]')!.addEventListener('click', () => ((shown = 999), render()));
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.d2f {
+		--c-full: #c2410c;
+		--c-semi: #b7791f;
+		--c-cache: #2f7d4f;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .d2f {
+		--c-full: #e06a2c;
+		--c-semi: #e0b04f;
+		--c-cache: #4fb07a;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .d2f {
+			--c-full: #e06a2c;
+			--c-semi: #e0b04f;
+			--c-cache: #4fb07a;
+		}
+	}
+	.d2f:not(.ready) {
+		display: none;
+	}
+	.d2f-controls {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.6rem 1rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.d2f-seg {
+		display: inline-flex;
+		padding: 3px;
+		gap: 2px;
+		border-radius: 8px;
+		background: var(--code-bg);
+	}
+	.d2f-seg button {
+		padding: 0.35rem 0.7rem;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		color: var(--muted);
+		font: 0.76rem var(--mono);
+		cursor: pointer;
+	}
+	.d2f-seg button[aria-checked='true'] {
+		background: var(--surface);
+		color: var(--fg);
+		box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+	}
+	.d2f-sel {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-family: var(--mono);
+		font-size: 0.76rem;
+		color: var(--muted);
+	}
+	.d2f-sel select {
+		padding: 0.2rem 0.3rem;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		background: var(--surface);
+		color: var(--fg);
+		font: inherit;
+	}
+	.d2f-buttons {
+		display: flex;
+		gap: 0.4rem;
+		margin-left: auto;
+	}
+	.d2f-scroll {
+		overflow-x: auto;
+		margin-top: 1rem;
+	}
+	.d2f-head,
+	.d2f-rows {
+		display: grid;
+		grid-template-columns: 1.6rem repeat(var(--n), minmax(1.45rem, 1fr)) 2.2rem;
+		gap: 2px;
+		min-width: 38rem;
+	}
+	.d2f-head span {
+		padding-bottom: 0.2rem;
+		border-bottom: 2px solid var(--line);
+		text-align: center;
+		font-family: var(--mono);
+		font-size: 0.64rem;
+		color: var(--muted);
+	}
+	.d2f-head span:first-child,
+	.d2f-head span:last-child {
+		border-bottom: 0;
+	}
+	.d2f-rows {
+		margin-top: 4px;
+		row-gap: 3px;
+		align-items: center;
+	}
+	.d2f-rows :global(.lab),
+	.d2f-rows :global(.plus) {
+		font-family: var(--mono);
+		font-size: 0.62rem;
+		color: var(--muted);
+		text-align: center;
+	}
+	.d2f-rows :global(.c) {
+		height: 1.35rem;
+		display: grid;
+		place-items: center;
+		overflow: hidden;
+		border-radius: 3px;
+		font-family: var(--mono);
+		font-size: 0.5rem;
+		white-space: nowrap;
+	}
+	.d2f-rows :global(.c.full) {
+		background: color-mix(in srgb, var(--c-full) 26%, var(--surface));
+	}
+	.d2f-rows :global(.c.semi) {
+		background: color-mix(in srgb, var(--c-semi) 18%, var(--surface));
+		outline: 1px dashed var(--c-semi);
+		outline-offset: -1px;
+	}
+	.d2f-rows :global(.c.mask) {
+		background-image: repeating-linear-gradient(-45deg, transparent 0 3px, rgb(0 0 0 / 0.12) 3px 4px);
+	}
+	.d2f-rows :global(.c.fresh) {
+		box-shadow: inset 0 0 0 1.5px var(--fg);
+		font-weight: 700;
+	}
+	.d2f-rows :global(.c.cache) {
+		background: color-mix(in srgb, var(--c-cache) 22%, var(--surface));
+		color: var(--muted);
+	}
+	.d2f-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 0.9rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.d2f-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.9rem;
+		height: 0.9rem;
+		display: inline-grid;
+		place-items: center;
+		border-radius: 3px;
+		font-style: normal;
+		font-size: 0.6rem;
+		color: var(--fg);
+	}
+	.sw.semi {
+		background: color-mix(in srgb, var(--c-semi) 18%, var(--surface));
+		outline: 1px dashed var(--c-semi);
+		outline-offset: -1px;
+	}
+	.sw.full {
+		background: color-mix(in srgb, var(--c-full) 26%, var(--surface));
+	}
+	.sw.fresh {
+		box-shadow: inset 0 0 0 1.5px var(--fg);
+		font-weight: 700;
+	}
+	.sw.cache {
+		background: color-mix(in srgb, var(--c-cache) 22%, var(--surface));
+	}
+	.d2f-note {
+		margin: 0.6rem 0 0;
+		min-height: 3em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	.d2f-totals {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.6rem;
+		margin-top: 0.6rem;
+		padding-top: 0.8rem;
+		border-top: 1px dashed var(--line);
+	}
+	.d2f-totals :global(div) {
+		display: grid;
+		gap: 0.05rem;
+		padding: 0.5rem 0.6rem;
+		border-radius: 8px;
+	}
+	.d2f-totals :global(div.on) {
+		background: var(--code-bg);
+	}
+	.d2f-totals :global(span) {
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		color: var(--muted);
+	}
+	.d2f-totals :global(b) {
+		font-family: var(--mono);
+		font-size: 1.25rem;
+	}
+	.d2f-totals :global(small) {
+		font-size: 0.78rem;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.d2f {
+			padding: 1rem;
+		}
+		.d2f-totals {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>
