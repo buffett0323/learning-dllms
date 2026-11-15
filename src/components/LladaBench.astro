@@ -1,0 +1,241 @@
+---
+// M06: LLaDA 8B against LLaMA3 8B, benchmark by benchmark (LLaDA paper Tables 1 and 2, same evaluation protocol
+// for both). One bar per benchmark: LLaDA minus LLaMA3, in points; right means LLaDA is ahead. Toggle base / instruct.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+type Row = [name: string, group: string, llada: number, llama: number];
+const data: Record<'base' | 'instruct', { vs: string; rows: Row[] }> = {
+	base: {
+		vs: 'LLaMA3 8B Base (15T tokens)',
+		rows: [
+			['MMLU', 'general', 65.9, 65.4],
+			['BBH', 'general', 49.7, 62.1],
+			['ARC-C', 'general', 45.9, 53.1],
+			['HellaSwag', 'general', 70.5, 79.1],
+			['TruthfulQA', 'general', 46.1, 44.0],
+			['WinoGrande', 'general', 74.8, 77.3],
+			['PIQA', 'general', 73.6, 80.6],
+			['GSM8K', 'math', 70.3, 48.7],
+			['MATH', 'math', 31.4, 16.0],
+			['GPQA', 'math', 25.2, 25.9],
+			['HumanEval', 'code', 35.4, 34.8],
+			['HumanEval-FIM', 'code', 73.8, 73.3],
+			['MBPP', 'code', 40.0, 48.8],
+			['CMMLU', 'Chinese', 69.9, 50.7],
+			['C-Eval', 'Chinese', 70.5, 51.7],
+		],
+	},
+	instruct: {
+		vs: 'LLaMA3 8B Instruct (SFT + RL)',
+		rows: [
+			['MMLU', 'general', 65.5, 68.4],
+			['MMLU-Pro', 'general', 37.0, 41.9],
+			['HellaSwag', 'general', 74.6, 75.5],
+			['ARC-C', 'general', 88.5, 82.4],
+			['GSM8K', 'math', 69.4, 78.3],
+			['MATH', 'math', 31.9, 29.6],
+			['GPQA', 'math', 33.3, 31.9],
+			['HumanEval', 'code', 49.4, 59.8],
+			['MBPP', 'code', 41.0, 57.6],
+		],
+	},
+};
+---
+
+<figure class="lb" data-lb data-config={JSON.stringify(data)}>
+	<div class="lb-controls" role="group" aria-label="Model stage">
+		<button class="btn" type="button" data-mode="base" aria-pressed="true">Base (pre-trained)</button>
+		<button class="btn" type="button" data-mode="instruct" aria-pressed="false">Instruct (after SFT)</button>
+		<span class="lb-vs" data-vs></span>
+	</div>
+	<div class="lb-axis" aria-hidden="true"><span></span><span class="lb-ends"><span>← LLaMA3 ahead</span><span>LLaDA ahead →</span></span><span></span></div>
+	<div class="lb-rows" data-rows></div>
+	<p class="lb-detail" data-detail aria-live="polite"></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	type Row = [string, string, number, number];
+	type Data = Record<string, { vs: string; rows: Row[] }>;
+	document.querySelectorAll<HTMLElement>('[data-lb]').forEach((fig) => {
+		const data = JSON.parse(fig.dataset.config!) as Data;
+		const rowsEl = fig.querySelector<HTMLElement>('[data-rows]')!;
+		const detail = fig.querySelector<HTMLElement>('[data-detail]')!;
+		const vsEl = fig.querySelector<HTMLElement>('[data-vs]')!;
+		const MAX = 25; // points at the edge of the track
+		let mode = 'base';
+		const idle = () => (detail.textContent = 'Hover or focus a row for both scores.');
+
+		function render() {
+			const { vs, rows } = data[mode];
+			vsEl.textContent = `vs. ${vs}`;
+			const sorted = [...rows].sort((a, b) => b[2] - b[3] - (a[2] - a[3]));
+			rowsEl.innerHTML = sorted
+				.map(([name, group, a, b]) => {
+					const d = a - b;
+					const w = (Math.min(Math.abs(d), MAX) / MAX) * 50;
+					const side = d >= 0 ? 'pos' : 'neg';
+					const style = d >= 0 ? `left:50%;width:${w}%` : `right:50%;width:${w}%`;
+					const label = `${name}: LLaDA ${a}, LLaMA3 ${b}`;
+					return `<div class="lb-row" tabindex="0" data-label="${label}" aria-label="${label}">
+						<span class="lb-name">${name}<small>${group}</small></span>
+						<span class="lb-track"><i class="lb-bar ${side}" style="${style}"></i></span>
+						<span class="lb-d">${d > 0 ? '+' : d < 0 ? '−' : ''}${Math.abs(d).toFixed(1)}</span>
+					</div>`;
+				})
+				.join('');
+			idle();
+		}
+		rowsEl.addEventListener('pointerover', (e) => {
+			const row = (e.target as HTMLElement).closest<HTMLElement>('.lb-row');
+			if (row) detail.textContent = row.dataset.label!;
+		});
+		rowsEl.addEventListener('pointerleave', idle);
+		rowsEl.addEventListener('focusin', (e) => {
+			const row = (e.target as HTMLElement).closest<HTMLElement>('.lb-row');
+			if (row) detail.textContent = row.dataset.label!;
+		});
+		fig.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((btn) =>
+			btn.addEventListener('click', () => {
+				mode = btn.dataset.mode!;
+				fig.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+				render();
+			}),
+		);
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.lb {
+		--c-pos: #2f6fb3;
+		--c-neg: #c2410c;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .lb {
+		--c-pos: #4f8fd6;
+		--c-neg: #e06a2c;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .lb {
+			--c-pos: #4f8fd6;
+			--c-neg: #e06a2c;
+		}
+	}
+	.lb:not(.ready) {
+		display: none;
+	}
+	.lb-controls {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem 0.8rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.lb-controls .btn[aria-pressed='true'] {
+		border-color: var(--fg);
+		color: var(--fg);
+		font-weight: 600;
+	}
+	.lb-vs {
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		color: var(--muted);
+	}
+	.lb-axis,
+	.lb-rows :global(.lb-row) {
+		display: grid;
+		grid-template-columns: 8rem 1fr 3.5rem;
+		align-items: center;
+		gap: 0 0.6rem;
+	}
+	.lb-axis {
+		margin-top: 0.9rem;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.lb-ends {
+		display: flex;
+		justify-content: space-between;
+	}
+	.lb-rows {
+		margin-top: 0.3rem;
+	}
+	.lb-rows :global(.lb-row) {
+		padding: 3px 0;
+		border-radius: 4px;
+		outline: none;
+	}
+	.lb-rows :global(.lb-row:hover),
+	.lb-rows :global(.lb-row:focus-visible) {
+		background: var(--code-bg);
+	}
+	.lb-rows :global(.lb-name) {
+		display: flex;
+		justify-content: space-between;
+		gap: 0.4rem;
+		font-family: var(--mono);
+		font-size: 0.74rem;
+	}
+	.lb-rows :global(.lb-name small) {
+		color: var(--muted);
+		font-size: 0.64rem;
+	}
+	.lb-rows :global(.lb-track) {
+		position: relative;
+		height: 14px;
+		background: linear-gradient(var(--line), var(--line)) 50% 0 / 1px 100% no-repeat;
+	}
+	.lb-rows :global(.lb-bar) {
+		position: absolute;
+		top: 2px;
+		height: 10px;
+	}
+	.lb-rows :global(.lb-bar.pos) {
+		background: var(--c-pos);
+		border-radius: 0 4px 4px 0;
+	}
+	.lb-rows :global(.lb-bar.neg) {
+		background: var(--c-neg);
+		border-radius: 4px 0 0 4px;
+	}
+	.lb-rows :global(.lb-d) {
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		text-align: right;
+		color: var(--fg);
+	}
+	.lb-detail {
+		margin: 0.6rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.74rem;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.lb {
+			padding: 1rem;
+		}
+		.lb-axis,
+		.lb-rows :global(.lb-row) {
+			grid-template-columns: 6.5rem 1fr 2.8rem;
+		}
+		.lb-rows :global(.lb-name small) {
+			display: none;
+		}
+	}
+</style>

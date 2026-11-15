@@ -1,0 +1,188 @@
+---
+title: 'LLaDA, Dream, and what came next'
+hook: 'Does masked diffusion scale like autoregression? Two open answers, and the versions that followed.'
+description: 'The open dLLMs most papers build on. LLaDA 8B, trained from scratch: architecture, training, scaling against AR, benchmarks, the reversal curse. Dream 7B, converted from Qwen2.5. And the LLaDA line after them: preference optimization in 1.5, block diffusion at 100B in 2.0, token editing in 2.1.'
+pubDate: '2026-11-15'
+---
+
+import LladaBench from '../../components/LladaBench.astro';
+import Note from '../../components/Note.astro';
+
+M03 to M05 built a masked diffusion model piece by piece: the loss, the canvas, the sampler. Before LLaDA (Nie et al., NeurIPS 2025), that recipe had only been tested up to about 1B parameters. LLaDA asks whether it still works at 8B, trained from scratch the way an AR LLM is: pre-training, then SFT, then the usual benchmarks.
+
+Its answer is a qualified yes. Dream 7B came soon after and took the other route: start from an AR model. Together they are the two open baselines that almost every paper in the P track runs on. The last part of this note follows the LLaDA line after the first model.
+
+## What LLaDA is
+
+Nothing new in the method. LLaDA is the M03 loss, the M04 canvas and the M05 sampler, applied at scale:
+
+- **Pre-training**: 2.3T tokens, 0.13M H800 GPU hours. That is about the cost of an AR model of the same size and data.
+- **SFT**: 4.5M (prompt, response) pairs, prompt never masked (M03).
+- **Sampling**: low-confidence remasking (M05).
+
+Both stages ran once, with no hyperparameter search.
+
+## The architecture: LLaMA without the causal mask
+
+The network is a LLaMA-style Transformer (RMSNorm, SwiGLU, RoPE) with the causal mask removed. Two other changes follow from that (Table 5):
+
+| | LLaDA 8B | LLaMA3 8B |
+|---|---|---|
+| Layers / width / heads | 32 / 4096 / 32 | 32 / 4096 / 32 |
+| Key/value heads | **32** | 8 |
+| FFN dimension | **12,288** | 14,336 |
+| Vocabulary | 126,464 | 128,000 |
+| Parameters | 8.02B | 8.03B |
+
+- **No grouped-query attention.** GQA shares key/value heads to make the KV cache smaller. LLaDA has no KV cache (M04), so it uses plain multi-head attention. That adds attention parameters, so the FFN is narrower to keep the total at 8B.
+- **No time input.** The number of masks already tells the model how noisy the input is (M03).
+
+The missing KV cache is a design choice here, not a law. The P track adds approximate caches to this exact model (P01), and the model is the baseline in most of those papers.
+
+## Training details that matter later
+
+- **Length 4096**, plus 1% of sequences cut to a random length in $[1, 4096]$. This is what lets the base model write a short piece and stop.
+- **SFT pads with `<eos>`**. Short pairs in a batch are padded with `<eos>` to equal length, and `<eos>` is trained like any token. That is how the model picks its answer length inside a fixed canvas (M04). It also causes the main sampling problem below.
+- **Warmup-Stable-Decay learning rate**: warm up, hold, then decay at the end (1.2T, 0.8T, 0.3T tokens per phase). Holding the rate fixed lets training run on without planning the end in advance.
+
+## Does it scale like AR?
+
+Fig. 3 compares LLaDA with AR baselines trained on the same data, from $10^{20}$ to $10^{23}$ FLOPs, on six tasks. At 1B the two share the architecture exactly. At the large end the AR baseline is a 7B model, not 8B.
+
+- **Overall**: the curves track each other.
+- **MMLU and GSM8K**: LLaDA scales better.
+- **PIQA**: LLaDA is behind, and the gap narrows with compute.
+
+Two limits. The authors fit no scaling law, so "scales like AR" means "the curves look alike", not equal exponents. And an earlier study (Nie et al., 2024) found that masked diffusion needs about 16× the compute of AR to reach the same likelihood. LLaDA's answer is that likelihood is an indirect measure, and for diffusion only a bound. On downstream tasks, it finds no such gap.
+
+## Against LLaMA3
+
+<LladaBench caption="LLaDA 8B minus LLaMA3 8B in points, same evaluation protocol for both (Tables 1 and 2). Right means LLaDA is ahead. LLaMA3 Base saw 15T tokens against LLaDA's 2.3T. LLaMA3 Instruct also had RL, while LLaDA had only SFT." />
+
+**Base.** LLaDA leads on math (GSM8K +21.6, MATH +15.4) and Chinese (CMMLU, C-Eval, about +19). It trails on commonsense and reasoning (BBH −12.4, HellaSwag −8.6, PIQA −7.0) and on MBPP (−8.8). MMLU and HumanEval are a tie.
+
+The authors attribute both the gains and the losses mostly to **data**: the mixes differ, and LLaMA3's is not public. To rule out GSM8K leakage, they test on iGSM, a synthetic set of GSM8K-style problems no model has seen, and LLaDA still leads (Appendix B.8). So the table shows that a dLLM can be competitive. It does not show where diffusion itself helps.
+
+**Instruct.** LLaDA falls behind on most tasks (GSM8K −8.9, HumanEval −10.4, MBPP −16.6). That is SFT against SFT + RL, with RL left to later work (M11).
+
+## The reversal curse
+
+AR models trained on "A is B" often fail at "B is A". LLaDA tests this on 496 pairs of lines from Chinese poems: given one line, write the next (forward) or the one before it (reversal), zero-shot (Table 4).
+
+| | Forward | Reversal |
+|---|---|---|
+| GPT-4o | 82.7 | 34.3 |
+| Qwen2.5-7B Instruct | 75.9 | 38.0 |
+| LLaDA 8B Instruct | 51.8 | **45.6** |
+
+Read it carefully. LLaDA is much weaker at forward, and its edge is that the two directions are **balanced**. That fits the training: the masked loss conditions on context from either side, so neither direction is favored. AR training conditions only on the left.
+
+## How it was sampled, in practice
+
+The headline numbers use pure diffusion: one canvas, low-confidence remasking, one token per step. For the instruct model, that runs into the `<eos>` padding from SFT. The model is very sure about `<eos>`, so it commits `<eos>` early, and the answers come out too short (M05). The paper uses two fixes:
+
+- **Zero the confidence of `<eos>`** during sampling, on GSM8K, MATH, HumanEval, MBPP and GPQA. Every reported instruct number on those tasks uses this.
+- **Semi-autoregressive blocks** (M05), left to right. With blocks of 32, GSM8K goes from 69.4 to 77.5 and MATH from 31.9 to 42.2. Blocks of 8 reach 78.6 (Table 8).
+
+Pure AR sampling (one token at a time, left to right) breaks the instruct model: 0 on GSM8K. It was fine-tuned only on complete answers, so given a short canvas it tries to write a whole answer in it.
+
+The base model is insensitive to canvas length: 256, 512 or 1024 tokens give similar scores (Table 10).
+
+## Speed, without any tricks
+
+Appendix B.7 measures on one A100 at batch 1, with a 256-token canvas and no cache, against LLaMA3 8B **with** its KV cache:
+
+- At comparable accuracy, LLaDA reaches 1.5× (GSM8K) and 1.8× (MATH) the throughput, by committing several tokens per step.
+- On HumanEval the two tie at matched throughput. On MBPP LLaDA lags.
+- Memory is close to LLaMA3 without a cache, and slightly above LLaMA3 with one (Table 11).
+
+This speed comes only from fewer steps, with each step recomputing everything. That leaves room for the P track to add caching (P01–P04) and better parallel decoding (P05).
+
+## Dream 7B: start from an AR model
+
+Dream (Ye et al., HKU and Huawei, 2025) asks the same question with a different start. It takes Qwen2.5-7B, keeps its architecture, and continues training it as a masked diffusion model (M07):
+
+- **Keep the shift.** The hidden state at position $i$ still predicts token $i+1$, as in the AR model, so the output head keeps its job.
+- **Open data.** 580B tokens of continued training (Dolma, OpenCoder, DCLM), then SFT on 1.8M pairs from Tulu 3 and SmolLM 2. LLaDA's 2.3T tokens are not public.
+- **CART, a per-token noise level.** In the M03 loss, every masked token in a sequence gets the same weight $1/t$. But a mask next to visible tokens is easier than one far from any. CART weights each masked token by how much clean context is near it, with a geometric decay in distance (Eq. 5).
+
+In a 1B test, starting from LLaMA3.2-1B gives a lower loss than training from scratch throughout 200B tokens (Fig. 4). The learning rate matters: too high and the AR knowledge is lost.
+
+Base models under one protocol (Table 1):
+
+| | Dream 7B | LLaDA 8B | Qwen2.5 7B (AR) |
+|---|---|---|---|
+| Tokens | 0.6T (+ Qwen's 18T) | 2.3T | 18T |
+| MMLU | 69.5 | 65.9 | 71.9 |
+| GSM8K | 77.2 | 70.9 | 78.9 |
+| HumanEval | 57.9 | 32.9 | 56.7 |
+| MBPP | 56.2 | 39.0 | 63.6 |
+| Sudoku (4×4) | 81.0 | 46.0 | 21.0 |
+| Countdown | 16.0 | 13.2 | 6.2 |
+
+Two readings:
+
+- **Dream lands near its AR parent, mostly a little below.** The paper says it uses "1/4 of the training data" of LLaDA, but that counts only the diffusion stage. Most of what Dream knows comes from Qwen's 18T tokens.
+- **Planning tasks are where both dLLMs beat AR.** Sudoku and Countdown need constraints satisfied across the whole answer, and a model that can fill any position first does better. LLaDA beats Qwen2.5 here too, so this looks like an effect of the objective, not of Dream's recipe.
+
+Dream does not need its own note: its conversion is M07, and its one new idea, CART, is a change of loss weight.
+
+## After LLaDA
+
+The LLaDA name continued, and each version fixes one of the limits listed in the first paper:
+
+| | Starting point | Attention | What changed |
+|---|---|---|---|
+| **LLaDA** (Feb 2025) | from scratch, 2.3T tokens | full | — |
+| **LLaDA 1.5** (May 2025) | LLaDA 8B Instruct | full | preference optimization (VRPO) |
+| **LLaDA-MoE** | from scratch | full | sparse experts (M09) |
+| **LLaDA 2.0** (Dec 2025) | Ling 2.0 AR MoE, 16B and 100B | **block-causal**, blocks of 32 | AR conversion, block diffusion |
+| **LLaDA 2.1** (Feb 2026) | same sizes as 2.0 | block-causal | tokens can be edited after commit; RL |
+
+The switch to block diffusion comes with 2.0, not 1.5. LLaDA 1.5 is the same model with alignment added.
+
+### LLaDA 1.5: preference optimization without a likelihood
+
+DPO, the usual preference method for AR models, compares the log-likelihood of a preferred and a rejected answer under the model and under a frozen reference. A dLLM has no exact log-likelihood, only the M03 bound, estimated by sampling $t$ and a mask. That estimate is noisy, and noise inside DPO's loss does not average out: it biases the loss as well as adding variance.
+
+**VRPO** reduces the noise in three ways:
+
+1. **More samples**: 8 per bound instead of 1, so 8× the compute of plain DPO. That is still under 0.5% of pre-training.
+2. **One mask per timestep**: spend the 8 samples on 8 different values of $t$, not 8 masks at one $t$.
+3. **Same samples for both models**: the model and the reference are scored on the same $t$ and the same mask, so most of the noise cancels in their difference. Without this, the variance of the score is about 1000× higher (Table 2: 2183.7 vs. 2.2).
+
+Trained on 350K preference pairs, LLaDA 1.5 improves on LLaDA Instruct everywhere: GSM8K 78.6 → 83.3, HumanEval +3.0, IFEval +4.0, Arena-Hard +4.3. M11 covers RL for dLLMs more generally.
+
+### LLaDA 2.0: block diffusion at 100B
+
+LLaDA 2.0 (Ant Group) stops training from scratch and stops using full attention. It converts Ant's Ling 2.0 AR MoE models into block diffusion models: LLaDA2.0-mini (16B) and LLaDA2.0-flash (100B).
+
+- **Block size schedule.** An AR model is block diffusion with blocks of 1. Training grows the block (1, 4, 32, 64, then 4096: the whole sequence, plain masked diffusion), trains there at scale, then shrinks it back to 32 for inference (M07). Blocks of 16 score slightly higher, 64 is worse in both score and speed, and 32 is the chosen trade-off.
+- **Document-level mask.** Training packs several documents into one sequence. With bidirectional attention a token would otherwise attend across document boundaries.
+- **CAP training.** An extra SFT loss lowers the entropy of predictions that are already correct. Sharper predictions pass the confidence threshold sooner, so more tokens are committed per step: 4.65 instead of 3.18 per forward, for a small drop in average score (78.57 → 76.85).
+- **Serving.** Block-causal attention gives an exact KV cache (P03), so 2.0 runs in dInfer and SGLang. LLaDA2.0-flash-CAP reaches 535 tokens/s against 256 and 237 for AR models of similar size, up to 2.1×.
+
+On its 47-benchmark average, LLaDA2.0-flash scores 73.18, between its AR parent Ling-flash-2.0 (72.15) and Qwen3-30B-A3B-Instruct (73.60).
+
+### LLaDA 2.1: undoing a committed token
+
+Under absorbing noise a committed token is final (M02). With an aggressive threshold, an early mistake stays, and later steps become cautious around it. LLaDA 2.1 adds a second kind of update, so that each step can:
+
+- **Unmask** a position whose top prediction exceeds $\tau_{\text{mask}}$, as before.
+- **Edit** a committed token if the model now prefers a different one with confidence above $\tau_{\text{edit}}$.
+
+Training mixes `[MASK]` noise with random-token noise, so the model learns to spot wrong tokens, not only fill blanks. The two thresholds give two modes: **Speedy**, with a low $\tau_{\text{mask}}$ that drafts fast and relies on editing, and **Quality**, with conservative thresholds. Speedy mode scores below 2.0 but commits many more tokens per step: the 100B model reaches 892 tokens/s on HumanEval+ (quantized). Quality mode scores above 2.0. 2.1 also adds a large-scale RL stage (M11). Editing after commit is the subject of P06.
+
+<Note kind="question">
+	LLaDA beats LLaMA3 Base on math and Chinese, and its own explanation is the data. Has anyone trained an AR model and a dLLM at 8B on the same data, to separate the effect of the objective from the effect of the data?
+</Note>
+
+## References
+
+1. Nie et al. *Large Language Diffusion Models* (LLaDA). NeurIPS 2025. [arXiv](https://arxiv.org/abs/2502.09992)
+2. Ye et al. *Dream 7B: Diffusion Large Language Models*. 2025. [arXiv](https://arxiv.org/abs/2508.15487)
+3. Zhu et al. *LLaDA 1.5: Variance-Reduced Preference Optimization for Large Language Diffusion Models*. 2025. [arXiv](https://arxiv.org/abs/2505.19223)
+4. Bie et al. *LLaDA2.0: Scaling Up Diffusion Language Models to 100B*. 2025. [arXiv](https://arxiv.org/abs/2512.15745)
+5. Bie et al. *LLaDA2.1: Speeding Up Text Diffusion via Token Editing*. 2026. [arXiv](https://arxiv.org/abs/2602.08676)
+6. Nie et al. *Scaling up Masked Diffusion Models on Text*. ICLR 2025.
+7. Berglund et al. *The Reversal Curse: LLMs trained on "A is B" fail to learn "B is A"*. ICLR 2024.

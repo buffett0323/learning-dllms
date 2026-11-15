@@ -24,7 +24,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 
 | # | Note | Hook | Status |
 | --- | --- | --- | --- |
-| M06 | LLaDA | Does masked diffusion scale like autoregression? | planned |
+| M06 | [LLaDA, Dream, and what came next](https://buffett0323.github.io/learning-dllms/posts/open-dllms/) | Does masked diffusion scale like autoregression? Two open answers, and the versions that followed. | live |
 | M07 | [Starting from an AR checkpoint](https://buffett0323.github.io/learning-dllms/posts/ar-to-diffusion/) | Reuse the AR weights; change the mask and the objective. | live |
 | M08 | [Block diffusion](https://buffett0323.github.io/learning-dllms/posts/block-diffusion/) | Autoregressive across blocks, diffusion within them. | live |
 | M09 | [Mixture-of-Experts dLLMs](https://buffett0323.github.io/learning-dllms/posts/moe-dllm/) | Sparse experts, dense blocks: every token in the block wakes up its own experts. | live |
