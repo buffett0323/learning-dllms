@@ -1,0 +1,62 @@
+---
+title: 'Multi-Block Diffusion Language Models (MBD-LMs)'
+authors: 'Yijie Jin, Jiajun Xu, Yuxuan Liu, Chenkai Xu, Yi Tu, Jiajun Li, Dandan Tu, Xiaohui Yan, Kai Yu, Pengfei Liu, Zhijie Deng'
+venue: 'arXiv'
+year: 2026
+pdf: 'mbd-lms.pdf'
+url: 'https://arxiv.org/abs/2606.29215'
+license: 'CC BY 4.0'
+hook: 'Decode two or three blocks at once, and train for what that actually looks like.'
+readDate: '2026-11-15'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import MBDDemo from '../../components/MBDDemo.astro';
+
+A block diffusion model (M08) decodes one block at a time. The next block waits until this one is finished and its K/V are written to the cache. D2F ([my notes](../d2f/)), from the same group, lets several blocks run at once. This paper asks why that works less well than it should, and fixes two things:
+
+- **Training** (§3.2, **MultiTF**): a short post-training run on block diffusion models such as LLaDA2-Mini and SDAR. Each training sequence is a clean prefix followed by a small **group** of 2–4 noisy blocks. Inside a group, each block is masked more than the one before it, by a random and often large margin.
+- **Inference** (§3.3, **Block Buffer**): a fixed number of block slots per request. A new block takes an idle slot instead of making the input longer, and a finished block leaves after its K/V are cached. The input shape never changes, so the step can be replayed as a CUDA Graph.
+
+<MBDDemo caption="Decoding: 5 blocks of 4 tokens, all three lanes in step. Orange outlines mark the blocks in this forward pass. A finished block is stored in the next pass. Single-block decoding spends that pass on storing alone; the multi-block lanes overlap it with decoding. The toy rates are illustrative: the untrained model commits in its second slot every other step, the MultiTF model every step. Training states: what each recipe shows the model around block 4." />
+
+Result on LLaDA2-Mini: 3.47 → 6.19 tokens per forward, accuracy 79.95 → 81.03, and 517 → 746 tokens/s (Tables 1 and 3).
+
+<Annotation page={1} line={43} text="naive MultiBD introduced by D2F, the expected running-set size is often around two, and adjacent slots" color="blue">
+**What is wrong with D2F's training?** D2F trains on a long run of noisy blocks, masked a little more at each step to the right. Inference looks different (Fig. 2):
+
+- **Few blocks.** Usually about two blocks are active at once, sometimes three or four.
+- **Large gaps.** The first is nearly done, the second is still mostly masked.
+
+D2F's smooth schedule gives neighboring blocks similar mask ratios, so the model rarely trains on the state it actually decodes in. The ablation shows the cost: with a D2F-style schedule inside the groups, accuracy drops from 84.67 to 79.34. With MultiTF's schedule, it stays at 84.59 (Table 2b).
+</Annotation>
+
+<Annotation page={4} line={41} text="prefix-caching concern. Its clean prefix" color="green">
+**A second problem: the prompt.** D2F trains the prompt with full attention, so a prompt token attends to later prompt tokens. A block-causal model's prefix cache assumes block-causal attention all the way, prompt included. So a D2F model does not plug into a block-diffusion serving stack as is. Retraining D2F fully block-causal fixes that but loses more quality (App. C.5).
+
+MultiTF starts from a model that is already block-causal (LLaDA2, SDAR) and keeps it that way, so finished blocks go into the standard prefix cache (P03).
+</Annotation>
+
+<Annotation page={7} line={44} text="This produces monotonic but randomized group-internal noise levels" color="blue">
+**The chain-uniform schedule (Alg. 1, lines 10–13).** For each group, draw a floor $\ell$. Then for each block in order, draw its mask ratio uniformly between $\ell$ and an upper bound, and make that the new floor. Ratios rise inside the group, but each step up is random and can be large, as at inference.
+
+Which groups to train on: all group sizes 2 to $G_{\max} = 4$ at every offset (systematic layouts), plus random splits. Each layout becomes its own training sequence, $[x_t; x_0]$ as in BD3-LM, with a mask that lets the blocks in a group see each other and the clean prefix (the Group-Aware Dual-Stream Mask).
+</Annotation>
+
+<Annotation page={9} line={11} text="Static-shape execution with Block Buffer" color="pink">
+**Why a buffer.** Done naively, the set of active blocks grows and shrinks, so the number of tokens per forward changes from step to step and across requests. CUDA Graphs need fixed shapes.
+
+The Block Buffer has $N_{\text{buf}}$ slots per request (2 for LLaDA2, 4 for SDAR). Each slot goes **dummy → active → to-cache → in-cache**. A new block activates a dummy slot; a finished block is written to the KV cache and the buffer slides forward. The price is that dummy slots and finished-but-not-yet-cached blocks are computed without producing tokens. This is a serving-engine design built for dLLMs (P10).
+</Annotation>
+
+<Annotation page={10} line={16} text="MBD-LLaDA2-Mini 91.96 5.55 79.20 6.02 72.49 5.35 80.49 7.85 81.03 6.19 449.18" color="yellow">
+**Read the accuracy per benchmark.** The average rises 79.95 → 81.03, but most of that is MATH500 (74.2 → 79.2) and HumanEval+ (78.05 → 80.49). MBPP+ falls (75.66 → 72.49). Only four math and code benchmarks are tested.
+
+Also note the row above: multi-block decoding **without** retraining already raises tokens per forward (3.47 → 4.41), for 1.4 points of accuracy. MultiTF recovers that and pushes further.
+</Annotation>
+
+<Annotation page={14} line={26} text="3.47 to 6.19, a 1.78× improvement, while the step latency increases from 7.07 ms to 8.78 ms" color="yellow">
+**Tokens per forward is not speed.** Committed tokens per step rise 1.78×, but each step now runs $N_{\text{buf}} \times B$ positions instead of $B$, and takes 1.24× as long. Throughput rises by about the ratio, $1.78 / 1.24 \approx 1.44×$, which is what they measure.
+
+This is measured at batch 1 (two H100s, tensor parallel). There a step is memory-bound and extra positions are cheap (P03, P08). With large batches the GPU is compute-bound, the extra positions cost full price, and the gain should shrink. The paper does not test that.
+</Annotation>
