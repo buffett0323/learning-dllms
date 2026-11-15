@@ -1,0 +1,83 @@
+---
+title: 'Trimming the masked suffix'
+hook: 'Hundreds of trailing masks, and the model barely looks past the first few.'
+description: 'What the masked suffix of a full-attention dLLM actually does, and the four ways papers deal with it: recompute it, freeze it (Fast-dLLM DualCache, Elastic-Cache), drop most of it (DPad), or never create it (block diffusion). With the evidence, the costs, and how to read the speedups.'
+pubDate: '2026-11-14'
+---
+
+import Note from '../../components/Note.astro';
+import SuffixModes from '../../components/SuffixModes.astro';
+
+A full-attention dLLM such as LLaDA or Dream fixes the output length before decoding: the prompt is followed by $L$ masks (M04). Decoding in blocks, it works on one block at a time, but every step still runs the whole sequence, including every mask to the right of the block. That is the **masked suffix**.
+
+Two things make it expensive. Its cost per step grows with $L$, not with the answer. And answers are often much shorter than $L$, so most of the suffix ends up as eos padding that is decoded too.
+
+## What the suffix does
+
+The masks carry no content. Yet the model attends to them, and two papers measured how:
+
+- **Distance.** Attention from the current block to the suffix falls off sharply with distance, and it is 10–100× smaller than attention to the prefix (DPad Fig. 3; Elastic-Cache Fig. 1a).
+- **Near masks are a scratchpad.** In one layer, masks attend to the prefix and the current block and store a summary in their hidden states. In the next layer, the current block reads it back (DPad Fig. 2). This is the authors' interpretation of attention maps, not a causal test.
+- **Far masks are a length signal.** They mainly tell the model how much room is left. Elastic-Cache calls this a **length bias**. It hardly changes from step to step.
+
+Every method below keeps the near masks and treats the far ones as cheap.
+
+## Four ways to handle it
+
+<SuffixModes caption="One decoding step, one cell per 8 tokens, blocks of 32. Raise the maximum length: the suffix grows in the first two rows, but DPad's window stays 256 tokens and block diffusion has no suffix at all. Move the block to the right: the suffix shrinks for everyone. The DPad row uses a fixed toy pattern of about 25% inside the window." />
+
+**1. Recompute.** Vanilla LLaDA and Dream run every position every step. dKV-Cache caches decoded tokens but still recomputes the masks (P01).
+
+**2. Freeze.** The suffix stays in the input, but its keys and values (K/V) are read from a cache.
+
+- **Fast-dLLM DualCache** (P01): refresh everything at the start of each block, then freeze everything outside it. The cut sits at the block edge, so the masks just past the block, the ones it uses most, are frozen too.
+- **Elastic-Cache** ([notes](../../papers/elastic-cache/)): compute a window of the $\beta$ leftmost masks, so the near masks are always fresh. Freeze the rest, and refresh only when attention drifts. Freezing the tail is faster **and** slightly more accurate than recomputing it (Table 15, GSM8K at 512: 82.7 → 119.8 tokens/s, 80.6 → 81.4).
+
+The two rest on different evidence. Fast-dLLM's is about **time**: K/V change little between adjacent steps (§3.2). That holds for anything cached, not only the suffix. Elastic-Cache's is about **space**: far masks get little attention and mostly carry a length bias (Fig. 1a). Only the second says the far suffix matters little, so only the second also supports dropping it (3. below).
+
+Frozen masks are not computed, but they are still read by attention, and they still take cache memory.
+
+**3. Drop.** **DPad** ([notes](../../papers/dpad/)) removes masks from the input before the forward pass. It keeps a window of $W$ masks after the block (128–512 tokens), thins it with a Gaussian that falls off with distance (20–37.5% kept), and drops everything else. The kept set is drawn once per block; after the block, all masks come back and are drawn again. Kept masks keep their original RoPE positions, so the model still sees how far away each one is.
+
+No scores are needed: the choice depends only on distance. This works because a mask holds no content of its own, so a neighbor can take over what a dropped mask would have stored (Fig. 4).
+
+**4. Never create it.** Block diffusion (M08) is causal across blocks: the current block never attends to anything on its right, so nothing is there. The sequence grows block by block until eos, and the cache is exact (P03). D2F keeps a few partly decoded blocks active at once, a short suffix of its own.
+
+## Side by side
+
+| | Suffix in the input | Computed per step | Cost grows with $L$? | Training |
+|---|---|---|---|---|
+| Recompute | all | all | yes | none |
+| DualCache | all, frozen | none (refreshed per block) | reads and memory | none |
+| Elastic-Cache | all, far part frozen | window of $\beta$ (plus refreshes) | reads and memory | none |
+| DPad | window, ~25% of it | kept masks | no | none (SFT proposed) |
+| Block diffusion | none | none | no | yes |
+
+The two middle approaches combine with others. DPad uses the prefix cache with parallel decoding, and needs no DualCache because little suffix is left.
+
+## What can go wrong
+
+- **Train/inference gap.** The model was trained with a full, unbroken run of masks after the block. Freezing keeps that shape; dropping changes it. DPad loses 7.3 points on Dream HumanEval at 2048 tokens, and proposes fine-tuning with the dropout (§5.1). Block diffusion avoids the gap by training without a suffix.
+- **Losing the length signal.** With far masks gone, the model no longer sees how much room is left. DPad reports shorter answers (GSM8K on LLaDA-1.5: 215 → 156 tokens), which helped the format score in that case. Whether it hurts tasks that need long answers is not tested.
+- **Positions.** A dropped suffix must keep the original RoPE positions of the kept masks. Re-indexing them would tell the model the answer ends much sooner.
+
+## Reading the speedups
+
+The largest numbers come from long maximum lengths: DPad 61.39× in latency (LLaDA-1.5, GSM8K, 1024 tokens), Elastic-Cache 45.1× in throughput (LLaDA-1.5, GSM8K, 512 tokens). The longer the canvas, the more the baseline pays for a suffix it does not need, and for eos padding after a ~200-token answer. Three things to check:
+
+1. **Early termination.** Stop once a block contains eos. Against vanilla with early termination, DPad alone gives 4.8× instead of 20.3×.
+2. **The strongest baseline.** Against Fast-dLLM (parallel decoding + prefix cache), DPad adds 5.2× in that setting.
+3. **Gen. length.** If the method writes shorter answers, latency improves more than throughput. Compare tokens per second, at equal accuracy.
+
+<Note kind="question">
+	Freezing keeps the far masks but stops paying for them; dropping removes them. Has anyone compared Elastic-Cache and DPad on the same model, length and baseline? Elastic-Cache came later and does not compare with DPad.
+</Note>
+
+## References
+
+1. Chen et al. *DPad: Efficient Diffusion Language Models with Suffix Dropout*. 2025. [arXiv](https://arxiv.org/abs/2508.14148)
+2. Nguyen-Tri, Ranjan, Shen. *Attention Is All You Need for KV Cache in Diffusion LLMs* (Elastic-Cache). ICLR 2026. [arXiv](https://arxiv.org/abs/2510.14973)
+3. Wu et al. *Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding*. 2025.
+4. Ma et al. *dKV-Cache: The Cache for Diffusion Language Models*. NeurIPS 2025.
+5. Arriola et al. *Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models* (BD3-LM). ICLR 2025.
+6. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025.

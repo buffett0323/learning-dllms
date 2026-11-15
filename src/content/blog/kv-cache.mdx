@@ -37,6 +37,8 @@ These run on full-attention dLLMs like LLaDA and Dream as they are.
 
 ## Make the cache exact (change the model)
 
+Decoding in blocks is not enough: Fast-dLLM above decodes in blocks too, and its cache is still approximate. What decides is the **attention mask** (M08, P03).
+
 **Block diffusion** (BD3-LM, ICLR 2025, [arXiv](https://arxiv.org/abs/2503.09573)). Train with attention that is causal **across** blocks and bidirectional within one. A finished block never sees later blocks, so its K/V are final and the cache is exact, as in AR. It also lets the output grow block by block. Details in M08.
 
 **Fast-dLLM v2** (ICLR 2026, [arXiv](https://arxiv.org/abs/2509.26328)). Turns a pretrained AR model (Qwen2.5) into a block diffusion model with roughly a billion tokens of fine-tuning. Two cache levels: finished blocks are exact read-only context; inside the current block, DualCache handles parallel decoding. Up to 2.5× faster than the original AR model at matching quality.
@@ -54,9 +56,9 @@ These run on full-attention dLLMs like LLaDA and Dream as they are.
 
 The trend: training-free methods moved from fixed schedules to adaptive ones that measure drift, while new models build the block structure in so that most of the cache is exact. Reported speedups use different models, lengths and baselines, so do not compare them across rows.
 
-<Note kind="question">
+{/* <Note kind="question">
 	Every row keeps more K/V per request than a plain recompute. How does that interact with batching many requests on one GPU? P08.
-</Note>
+</Note> */}
 
 ## References
 

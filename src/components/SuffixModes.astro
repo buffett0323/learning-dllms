@@ -1,0 +1,248 @@
+---
+// P04: what happens to the masked suffix at one decoding step, under four approaches, on the same canvas.
+// One cell = 8 tokens. Prompt 32 tokens, blocks of 32. Sliders: maximum generation length and which block is
+// being decoded. Rows:
+// - recompute (vanilla LLaDA/Dream): every position runs every step.
+// - freeze (Fast-dLLM DualCache, Elastic-Cache): suffix K/V read from a cache, refreshed now and then.
+// - drop (DPad): window of 256 tokens after the block, ~25% of it kept (fixed toy pattern), rest not in the input.
+// - never create (block diffusion): nothing exists to the right of the current block.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const rows = [
+	{ id: 'recompute', name: 'Recompute', who: 'vanilla LLaDA, Dream' },
+	{ id: 'freeze', name: 'Freeze', who: 'DualCache, Elastic-Cache' },
+	{ id: 'drop', name: 'Drop', who: 'DPad' },
+	{ id: 'none', name: 'Never create', who: 'block diffusion, D2F' },
+];
+---
+
+<figure class="sm" data-sm data-config={JSON.stringify({ rows })}>
+	<div class="sm-controls">
+		<label><span>max length <b data-v="len"></b> tokens</span><input type="range" min="256" max="1024" step="128" value="512" data-in="len" /></label>
+		<label><span>decoding block <b data-v="blk"></b></span><input type="range" min="0" max="15" step="1" value="2" data-in="blk" /></label>
+	</div>
+	<div class="sm-rows" data-rows></div>
+	<p class="sm-legend" aria-hidden="true">
+		<span><i class="sw ctx"></i>prompt + decoded (cached)</span>
+		<span><i class="sw cur"></i>current block, computed</span>
+		<span><i class="sw run"></i>suffix, computed</span>
+		<span><i class="sw frz"></i>suffix, read from cache</span>
+		<span><i class="sw gone"></i>not in the input</span>
+	</p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	type Row = { id: string; name: string; who: string };
+	document.querySelectorAll<HTMLElement>('[data-sm]').forEach((fig) => {
+		const { rows } = JSON.parse(fig.dataset.config!) as { rows: Row[] };
+		const rowsEl = fig.querySelector<HTMLElement>('[data-rows]')!;
+		const lenIn = fig.querySelector<HTMLInputElement>('[data-in="len"]')!;
+		const blkIn = fig.querySelector<HTMLInputElement>('[data-in="blk"]')!;
+		const U = 8; // tokens per cell
+		const P = 4; // prompt cells
+		const B = 4; // block cells
+		const W = 32; // DPad window cells (256 tokens)
+		// Fixed toy keep pattern inside the window, denser near the block (~25% overall).
+		const keep = (d: number) => d < W && (d < 3 || [4, 6, 9, 13, 18, 24].includes(d));
+
+		function render() {
+			const len = Number(lenIn.value);
+			const cells = len / U;
+			const nBlocks = cells / B;
+			blkIn.max = String(nBlocks - 1);
+			const b = Math.min(Number(blkIn.value), nBlocks - 1);
+			fig.querySelector('[data-v="len"]')!.textContent = String(len);
+			fig.querySelector('[data-v="blk"]')!.textContent = `${b + 1} of ${nBlocks}`;
+			const start = b * B;
+			const end = start + B;
+			const sufCells = cells - end;
+			rowsEl.style.setProperty('--n', String(P + cells));
+			rowsEl.innerHTML = rows
+				.map((r) => {
+					let html = `<span class="sm-who"><b>${r.name}</b><small>${r.who}</small></span>`;
+					let run = 0;
+					let frz = 0;
+					for (let i = 0; i < P + cells; i++) {
+						const a = i - P; // answer cell index
+						let cls: string;
+						if (a < start) cls = r.id === 'recompute' ? 'ctx run-ctx' : 'ctx';
+						else if (a < end) cls = 'cur';
+						else {
+							const d = a - end;
+							cls = r.id === 'recompute' ? 'run' : r.id === 'freeze' ? 'frz' : r.id === 'drop' ? (keep(d) ? 'run' : 'gone') : 'gone';
+							if (cls === 'run') run += U;
+							if (cls === 'frz') frz += U;
+						}
+						html += `<span class="sm-c ${cls}"></span>`;
+					}
+					const summary =
+						r.id === 'none'
+							? 'no suffix'
+							: `${run} computed${frz ? `, ${frz} read` : ''}${r.id === 'drop' ? `, ${sufCells * U - run} dropped` : ''}`;
+					return html + `<span class="sm-sum">${summary}</span>`;
+				})
+				.join('');
+		}
+		lenIn.addEventListener('input', render);
+		blkIn.addEventListener('input', render);
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.sm {
+		--c-cur: #c2410c;
+		--c-run: #b7791f;
+		--c-frz: #2f6fb3;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .sm {
+		--c-cur: #e06a2c;
+		--c-run: #d69e2e;
+		--c-frz: #4f8fd6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .sm {
+			--c-cur: #e06a2c;
+			--c-run: #d69e2e;
+			--c-frz: #4f8fd6;
+		}
+	}
+	.sm:not(.ready) {
+		display: none;
+	}
+	.sm-controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.6rem 1.6rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.sm-controls label {
+		display: grid;
+		gap: 0.2rem;
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		color: var(--muted);
+	}
+	.sm-controls b {
+		color: var(--fg);
+	}
+	.sm-controls input {
+		width: 11rem;
+		accent-color: var(--c-frz);
+	}
+	.sm-rows {
+		display: grid;
+		grid-template-columns: 7.5rem repeat(var(--n), minmax(0, 1fr)) 7.5rem;
+		gap: 6px 1px;
+		align-items: center;
+		margin-top: 1rem;
+	}
+	.sm-rows :global(.sm-who) {
+		display: grid;
+		line-height: 1.2;
+		padding-right: 0.4rem;
+	}
+	.sm-rows :global(.sm-who b) {
+		font-family: var(--mono);
+		font-size: 0.72rem;
+	}
+	.sm-rows :global(.sm-who small) {
+		font-size: 0.66rem;
+		color: var(--muted);
+	}
+	.sm-rows :global(.sm-sum) {
+		padding-left: 0.5rem;
+		font-family: var(--mono);
+		font-size: 0.64rem;
+		color: var(--muted);
+		line-height: 1.25;
+	}
+	.sm-rows :global(.sm-c) {
+		height: 1.6rem;
+		border-radius: 1px;
+	}
+	.sm-rows :global(.sm-c.ctx) {
+		background: color-mix(in srgb, var(--c-frz) 14%, var(--surface));
+	}
+	.sm-rows :global(.sm-c.run-ctx) {
+		background: color-mix(in srgb, var(--c-run) 40%, var(--surface));
+	}
+	.sm-rows :global(.sm-c.cur) {
+		background: color-mix(in srgb, var(--c-cur) 55%, var(--surface));
+	}
+	.sm-rows :global(.sm-c.run) {
+		background: color-mix(in srgb, var(--c-run) 40%, var(--surface));
+		background-image: repeating-linear-gradient(-45deg, transparent 0 3px, rgb(0 0 0 / 0.12) 3px 4px);
+	}
+	.sm-rows :global(.sm-c.frz) {
+		background: color-mix(in srgb, var(--c-frz) 30%, var(--surface));
+		background-image: repeating-linear-gradient(-45deg, transparent 0 3px, rgb(0 0 0 / 0.12) 3px 4px);
+	}
+	.sm-rows :global(.sm-c.gone) {
+		background: none;
+		border-top: 1px dotted var(--line);
+		border-bottom: 1px dotted var(--line);
+	}
+	.sm-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 0.9rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		color: var(--muted);
+	}
+	.sm-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.9rem;
+		height: 0.9rem;
+		border-radius: 3px;
+	}
+	.sw.ctx {
+		background: color-mix(in srgb, var(--c-frz) 14%, var(--surface));
+	}
+	.sw.cur {
+		background: color-mix(in srgb, var(--c-cur) 55%, var(--surface));
+	}
+	.sw.run {
+		background: color-mix(in srgb, var(--c-run) 40%, var(--surface));
+	}
+	.sw.frz {
+		background: color-mix(in srgb, var(--c-frz) 30%, var(--surface));
+	}
+	.sw.gone {
+		border: 1px dotted var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.sm {
+			padding: 1rem;
+		}
+		.sm-rows {
+			grid-template-columns: 5.5rem repeat(var(--n), minmax(0, 1fr)) 4.5rem;
+			gap: 6px 0;
+		}
+		.sm-rows :global(.sm-who small) {
+			display: none;
+		}
+	}
+</style>

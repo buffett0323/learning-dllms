@@ -46,8 +46,8 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | --- | --- | --- | --- |
 | P01 | [Caching without causality](https://buffett0323.github.io/learning-dllms/posts/kv-cache/) | Bidirectional attention breaks the KV cache. Mostly. | live |
 | P02 | [Keeping fewer tokens](https://buffett0323.github.io/learning-dllms/posts/sparse-kv/) | Most keys get almost no attention. Which ones can each head drop? | live |
-| P03 | An exact cache again | Make attention causal between blocks, and the KV cache stops being an approximation. | planned |
-| P04 | Trimming the masked suffix | Hundreds of trailing masks, and the model barely looks past the first few. | planned |
+| P03 | [An exact cache again](https://buffett0323.github.io/learning-dllms/posts/block-cache/) | Make attention causal between blocks, and the KV cache stops being an approximation. | live |
+| P04 | [Trimming the masked suffix](https://buffett0323.github.io/learning-dllms/posts/suffix-window/) | Hundreds of trailing masks, and the model barely looks past the first few. | live |
 
 #### Decoding strategies
 
@@ -78,6 +78,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [Fast-dLLM v2](https://buffett0323.github.io/learning-dllms/papers/fast-dllm-v2/) | Block diffusion from Qwen2.5 with ~1B tokens; block and sub-block caches | on the PDF |
 | [Elastic-Cache](https://buffett0323.github.io/learning-dllms/papers/elastic-cache/) | Attention-triggered, layer-aware cache refresh; sliding window with cached far masks | on the PDF |
 | [D2F](https://buffett0323.github.io/learning-dllms/papers/d2f/) | Distill a block-causal dLLM that decodes from unfinished blocks; pipelined parallel decoding | on the PDF |
+| [DPad](https://buffett0323.github.io/learning-dllms/papers/dpad/) | Training-free suffix window + Gaussian distance-decay dropout; suffix as scratchpad | on the PDF |
 
 <!-- ## Writing
 

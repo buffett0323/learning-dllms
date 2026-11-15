@@ -1,0 +1,92 @@
+---
+title: 'An exact cache again'
+hook: 'Make attention causal between blocks, and the KV cache stops being an approximation.'
+description: 'The caching side of block diffusion: why finished blocks give an exact KV cache, the extra pass that writes it, the approximate cache that returns inside the current block, what a step costs against AR and full attention, and how D2F decodes several blocks over the same cache.'
+pubDate: '2026-11-14'
+---
+
+import ExactCacheDemo from '../../components/ExactCacheDemo.astro';
+import Note from '../../components/Note.astro';
+
+P01's caches make decoding fast by reusing keys and values (K/V) that may be out of date. Block diffusion (M08) gives a cache that is never out of date for most of the sequence. This note is about that difference, and what it costs.
+
+## Exact vs. approximate cache
+
+A position's K/V at layer $l$ depend only on the positions it attends to in the layers below. So a cached K/V can be in one of two states:
+
+- **Exact**: nothing it attends to has changed since it was computed. Reusing it gives the same result as recomputing it.
+- **Approximate**: something it attends to has changed. Reusing it is a bet that the change was small.
+
+Every cache in P01 is approximate. Fast-dLLM, dKV-Cache, dLLM-Cache and Elastic-Cache differ only in which stale K/V they trust and when they refresh. The bet usually pays off, but it needs a refresh schedule, and the error is never zero.
+
+Which state you get depends on the attention mask, not on the cache or the decoding order. Fast-dLLM decodes LLaDA block by block, yet its cache is approximate everywhere.
+
+- **AR**: position $i$ attends to positions $\le i$, which are final. Exact.
+- **Full attention** (LLaDA, Dream): every position attends to the whole sequence, including masks that are decoded later. Never exact.
+- **Block-causal** (BD3-LM and its successors): a position in block $b$ attends to blocks $\le b$. Once block $b$ is finished, none of those change again. Exact, with a block in the role of AR's token.
+
+The prompt is the first block. It is prefilled once, as in AR.
+
+## The extra pass
+
+A finished block's K/V must be computed from its clean tokens. The last denoising pass does not give them: the token committed in that step was still a mask in its input. So BD3-LM (Alg. 2) runs the finished block once more and caches the result. This pass can share a forward with the first step of the next block, as in the demo.
+
+<ExactCacheDemo caption="Same toy as the P01 demo: 12 answer tokens in 3 blocks of 4, one token per step. Full attention + DualCache reuses stale entries everywhere outside the block. Block-causal reads only exact entries, and the blocks to its right do not exist yet. Adding Fast-dLLM v2's sub-block cache (sub-blocks of 2 here) saves more positions, but the stale entries come back, now only inside the current block." />
+
+Two things to see in the totals. Block-causal runs fewer positions than DualCache (60 vs. 84) and reads no stale entry. With the sub-block cache, it runs fewer still (48), and the price is 12 stale reads, all inside the current block.
+
+## Exact across blocks, approximate inside
+
+Block-causal makes the cache exact only **across** blocks. Inside the current block, attention is still bidirectional, so the P01 problem comes back at a small scale: cache part of the block, and that part goes stale as soon as another token in it is decoded.
+
+The larger the block, the more the **inside** matters. Every step runs the whole block, so with blocks of 32 or 64 most of a step's work is inside it, and that is the only place left for a cache to save anything.
+
+Fast-dLLM v2 brings the approximate cache back on purpose. It trains with blocks of 32 and decodes each block in **sub-blocks** of 8: each step computes only the current sub-block and reads the rest of the block from a DualCache. It trades exactness inside the block for less compute per step. Two findings in §4:
+
+- **Accuracy**: the sub-block cache has no visible effect (Fig. 6a). The error is confined to at most 32 positions, all of which are recomputed often.
+- **Speed**: it helps only in the compute-bound regime, such as batch 32. At batch 1 it gives almost nothing (Fig. 6b). At small batch a step is memory-bound: the cost is reading the weights, and computing 8 or 32 positions takes about the same time.
+
+Sub-blocks only change which tokens may be committed at a step. The attention mask is still the 32-token block the model was trained with, so the sub-block size can be tuned at inference without retraining: smaller is closer to AR and more accurate, larger is faster (Table 3, Fig. 6). Changing the block size itself changes the mask, and that hurts: GSM8K 62.0 → 58.5 (Table 4).
+
+## What a step costs
+
+Per decoding step, with $L$ the full length and $L'$ the block size ($L' \ll L$):
+
+| | Positions computed | K/V read | Cache exact? |
+|---|---|---|---|
+| AR | 1 | prefix | yes |
+| Full attention, no cache | $L$ | none | (nothing cached) |
+| Full attention, DualCache | $L'$ | everything else | no |
+| Block-causal | $L'$ (+ $L'$ once per block) | prefix | yes |
+| Block-causal + sub-block cache | sub-block | prefix + rest of block | prefix only |
+
+Block-causal reads the same cache as AR and computes $L'$ positions instead of one. That is the whole bet: on a memory-bound GPU, $L'$ positions cost about as much as one, and parallel decoding commits several tokens per step. Fast-dLLM v2 reports 2.54× the throughput of Qwen2.5-7B-Instruct at comparable accuracy (Fig. 1), and 1.5× (A100) to 1.8× (H100) at batch 64 (Fig. 5).
+
+Unlike full attention, nothing to the right of the current block is in the sequence. The cache grows with the output, as in AR, so there is no fixed canvas of masks to pay for. That is the problem P04 deals with for full-attention models.
+
+## Starting the next block early: D2F
+
+An exact cache needs a finished block, so block-causal decoding is parallel only inside one block. D2F ([my notes](../../papers/d2f/)) relaxes this. It trains with **diffusion forcing** (M08), so a block can be decoded from a prefix that is still partly masked. At inference it keeps several blocks **active** and runs them in one forward pass:
+
+- **Finished blocks**: in the exact cache, as above.
+- **Active blocks**: recomputed every step. Their prefix is still changing, so their K/V are not cached.
+
+Each step computes more positions, but there are fewer steps. D2F-Dream reaches 119.9 tokens/s on GSM8K, 2.5× LLaMA3-8B. The exact part of the cache is unchanged.
+
+## What it does not fix
+
+- **It needs a trained model.** The mask has to be learned: from scratch (BD3-LM), from an AR checkpoint (Fast-dLLM v2, SDAR, LLaDA 2.0; M07), or by distillation from a dLLM (D2F). The training-free caches of P01 remain the option for LLaDA and Dream as they are.
+- **No right context across blocks.** A finished block never sees what comes after it (M08).
+- **The current block.** Any cache inside it is approximate again, as above.
+
+<Note kind="question">
+	The exact cache grows with the output, like an AR cache. Can a dLLM serving engine then reuse paged KV memory from AR engines as is? P09.
+</Note>
+
+## References
+
+1. Arriola et al. *Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models* (BD3-LM). ICLR 2025. [arXiv](https://arxiv.org/abs/2503.09573)
+2. Wu et al. *Fast-dLLM v2: Efficient Block-Diffusion LLM*. ICLR 2026. [arXiv](https://arxiv.org/abs/2509.26328)
+3. Cheng et al. *SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation*. 2025.
+4. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025. [arXiv](https://arxiv.org/abs/2508.09192)
+5. Wu et al. *Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding*. 2025.

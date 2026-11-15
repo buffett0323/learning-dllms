@@ -1,0 +1,254 @@
+---
+// DPad's suffix dropout (§3.2, Eq. 10). The current block is followed by N suffix masks. Positions past the
+// sliding window W are dropped. Inside it, position d (1..W) is kept with probability
+// P(d) = min(1, a · φ(k · d / W)), φ the standard normal pdf: k sets how fast it decays, a the overall level.
+// The kept set is drawn once before the block's first step and used for every step of the block; after the
+// block is done, every dropped mask comes back and the draw is repeated (Next block).
+// Toy: per-position Bernoulli draws with a seeded RNG; the paper uses rejection sampling.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const block = 8;
+const suffix = 96;
+---
+
+<figure class="dp" data-dp data-config={JSON.stringify({ block, suffix })}>
+	<div class="dp-controls">
+		<label><span>window W <b data-v="W"></b></span><input type="range" min="16" max="96" step="8" value="48" data-in="W" /></label>
+		<label><span>decay k <b data-v="k"></b></span><input type="range" min="1" max="4" step="0.5" value="3" data-in="k" /></label>
+		<label><span>scale a <b data-v="a"></b></span><input type="range" min="1" max="2.5" step="0.1" value="2" data-in="a" /></label>
+		<button class="btn primary" type="button" data-act="next">Next block</button>
+	</div>
+	<svg class="dp-svg" viewBox="0 0 1000 190" role="img" aria-label="Retention probability and kept suffix positions" data-svg></svg>
+	<p class="dp-legend" aria-hidden="true">
+		<span><i class="sw cur"></i>current block</span>
+		<span><i class="sw keep"></i>kept mask</span>
+		<span><i class="sw drop"></i>dropped (inside window)</span>
+		<span><i class="sw out"></i>outside window</span>
+		<span><i class="sw line"></i>P(d)</span>
+	</p>
+	<p class="dp-note" data-note></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	document.querySelectorAll<HTMLElement>('[data-dp]').forEach((fig) => {
+		const { block, suffix } = JSON.parse(fig.dataset.config!) as { block: number; suffix: number };
+		const svg = fig.querySelector<SVGSVGElement>('[data-svg]')!;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		const val = (n: string) => Number(fig.querySelector<HTMLInputElement>(`[data-in="${n}"]`)!.value);
+		let seed = 7;
+		let blockNo = 1;
+		// Small deterministic RNG (mulberry32), so a redraw only happens on Next block.
+		const rng = (s: number) => () => {
+			s |= 0;
+			s = (s + 0x6d2b79f5) | 0;
+			let t = Math.imul(s ^ (s >>> 15), 1 | s);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+		const phi = (x: number) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+		function render() {
+			const W = val('W');
+			const k = val('k');
+			const a = val('a');
+			fig.querySelector('[data-v="W"]')!.textContent = String(W);
+			fig.querySelector('[data-v="k"]')!.textContent = k.toFixed(1);
+			fig.querySelector('[data-v="a"]')!.textContent = a.toFixed(1);
+			const p = (d: number) => (d <= W ? Math.min(1, a * phi((k * d) / W)) : 0);
+			const r = rng(seed);
+			const n = block + suffix;
+			const x0 = 10;
+			const cw = 980 / n;
+			const top = 20;
+			const plotH = 90;
+			const barY = 130;
+			const barH = 34;
+			let kept = 0;
+			let cells = '';
+			for (let i = 0; i < n; i++) {
+				const x = x0 + i * cw;
+				let cls: string;
+				if (i < block) cls = 'cur';
+				else {
+					const d = i - block + 1;
+					const u = r();
+					if (d > W) cls = 'out';
+					else if (u < p(d)) {
+						cls = 'keep';
+						kept++;
+					} else cls = 'drop';
+				}
+				cells += `<rect class="${cls}" x="${x + 0.6}" y="${barY}" width="${cw - 1.2}" height="${barH}" rx="1.5"/>`;
+			}
+			// P(d) curve over the suffix.
+			const pts: string[] = [];
+			for (let d = 1; d <= suffix; d++) {
+				const x = x0 + (block + d - 0.5) * cw;
+				pts.push(`${x.toFixed(1)},${(top + plotH * (1 - p(d))).toFixed(1)}`);
+			}
+			const wx = x0 + (block + W) * cw;
+			const sx = x0 + block * cw;
+			svg.innerHTML = `
+				<line class="axis" x1="${sx}" y1="${top}" x2="${sx}" y2="${top + plotH}"/>
+				<line class="axis" x1="${sx}" y1="${top + plotH}" x2="990" y2="${top + plotH}"/>
+				<text class="lab" x="${sx - 6}" y="${top + 4}" text-anchor="end">1</text>
+				<text class="lab" x="${sx - 6}" y="${top + plotH}" text-anchor="end">0</text>
+				<line class="win" x1="${wx}" y1="${top - 8}" x2="${wx}" y2="${barY + barH + 6}"/>
+				<text class="lab" x="${Math.min(wx, 960) + 4}" y="${top - 2}">W</text>
+				<polyline class="curve" points="${pts.join(' ')}"/>
+				${cells}
+				<text class="lab" x="${x0}" y="${barY + barH + 18}">current</text>
+				<text class="lab" x="${sx + 2}" y="${barY + barH + 18}">suffix → d = 1 … ${suffix}</text>`;
+			const density = Array.from({ length: W }, (_, i) => p(i + 1)).reduce((s, v) => s + v, 0) / W;
+			note.textContent =
+				`Block ${blockNo}. The forward pass gets the prefix, the ${block} current positions and ${kept} of ${suffix} suffix masks ` +
+				`(expected density inside the window ${(density * 100).toFixed(0)}%; the paper uses 20–37.5%). ` +
+				`The kept set is fixed for every step of this block. Next block restores all masks and draws again.`;
+		}
+
+		fig.querySelectorAll('input').forEach((el) => el.addEventListener('input', render));
+		fig.querySelector('[data-act="next"]')!.addEventListener('click', () => {
+			seed += 1;
+			blockNo += 1;
+			render();
+		});
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.dp {
+		--c-cur: #c2410c;
+		--c-keep: #2f6fb3;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .dp {
+		--c-cur: #e06a2c;
+		--c-keep: #4f8fd6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .dp {
+			--c-cur: #e06a2c;
+			--c-keep: #4f8fd6;
+		}
+	}
+	.dp:not(.ready) {
+		display: none;
+	}
+	.dp-controls {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: end;
+		gap: 0.6rem 1.2rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.dp-controls label {
+		display: grid;
+		gap: 0.2rem;
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		color: var(--muted);
+	}
+	.dp-controls b {
+		color: var(--fg);
+	}
+	.dp-controls input {
+		width: 8.5rem;
+		accent-color: var(--c-keep);
+	}
+	.dp-svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		margin-top: 0.8rem;
+	}
+	.dp-svg :global(.axis) {
+		stroke: var(--line);
+		stroke-width: 1.5;
+	}
+	.dp-svg :global(.win) {
+		stroke: var(--muted);
+		stroke-width: 1.5;
+		stroke-dasharray: 4 3;
+	}
+	.dp-svg :global(.curve) {
+		fill: none;
+		stroke: var(--fg);
+		stroke-width: 2;
+	}
+	.dp-svg :global(.lab) {
+		fill: var(--muted);
+		font: 13px var(--mono);
+	}
+	.dp-svg :global(rect.cur) {
+		fill: color-mix(in srgb, var(--c-cur) 45%, var(--surface));
+	}
+	.dp-svg :global(rect.keep) {
+		fill: color-mix(in srgb, var(--c-keep) 60%, var(--surface));
+	}
+	.dp-svg :global(rect.drop) {
+		fill: color-mix(in srgb, var(--c-keep) 22%, var(--surface));
+	}
+	.dp-svg :global(rect.out) {
+		fill: var(--code-bg);
+		opacity: 0.6;
+	}
+	.dp-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 0.6rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		color: var(--muted);
+	}
+	.dp-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.9rem;
+		height: 0.9rem;
+		border-radius: 3px;
+	}
+	.sw.cur {
+		background: color-mix(in srgb, var(--c-cur) 45%, var(--surface));
+	}
+	.sw.keep {
+		background: color-mix(in srgb, var(--c-keep) 60%, var(--surface));
+	}
+	.sw.drop {
+		background: color-mix(in srgb, var(--c-keep) 22%, var(--surface));
+	}
+	.sw.out {
+		background: var(--code-bg);
+		border: 1px solid var(--line);
+	}
+	.sw.line {
+		height: 2px;
+		background: var(--fg);
+	}
+	.dp-note {
+		margin: 0.6rem 0 0;
+		min-height: 3em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+</style>

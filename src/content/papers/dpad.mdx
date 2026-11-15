@@ -1,0 +1,98 @@
+---
+title: 'DPad: Efficient Diffusion Language Models with Suffix Dropout'
+authors: 'Xinhua Chen, Sitao Huang, Cong Guo, Chiyue Wei, Yintao He, Jianyi Zhang, Hai "Helen" Li, Yiran Chen'
+venue: 'arXiv'
+year: 2025
+pdf: 'dpad.pdf'
+url: 'https://arxiv.org/abs/2508.14148'
+license: 'CC BY 4.0'
+hook: 'Most of the masked suffix is never needed. Keep a window of nearby masks, thin it with a Gaussian, and drop the rest before the forward pass.'
+readDate: '2026-11-14'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import DPadDropout from '../../components/DPadDropout.astro';
+import Highlight from '../../components/Highlight.astro';
+
+A training-free method for full-attention dLLMs (LLaDA, Dream). Every step of vanilla decoding runs the whole masked suffix, though only the current block is decoded. DPad cuts the suffix down **before** the forward pass:
+
+- **Sliding window**: keep only the $W$ masks right after the current block. The window moves with the block, so the suffix cost no longer grows with the generation length.
+- **Distance-decay dropout**: inside the window, keep each mask with a probability that falls off like a Gaussian with distance.
+
+The kept set is drawn once per block, the RoPE positions of kept tokens stay the original ones, and DPad stacks with parallel decoding and the prefix cache. It also stops at the first block that contains eos.
+
+<DPadDropout caption="One block of 8 followed by 96 suffix masks. The curve is the keep probability P(d) of Eq. 10; each draw keeps a different subset. Move W, k and a and watch the density: k sets how quickly P falls inside the window, a the overall level. Toy: one coin flip per position; the paper samples with rejection sampling." />
+
+<Annotation page={5} line={17} text="while Block 6 feeds this stored information back to the current block" color="blue">
+**What Fig. 2 shows.** Split the sequence into prefix, current block and suffix; the attention matrix becomes 3 × 3 blocks. Three matter:
+
+- **7, 8** (suffix queries → prefix, current keys): at layer $n$ the masks **write** a summary of the context into their hidden states (Eq. 8).
+- The FFN works per token, so that summary stays at the suffix positions until the next attention.
+- **6** (current queries → suffix keys): at layer $n+1$ the current block **reads** it back.
+
+So the suffix is a **scratchpad**: no content of its own, a place to park context between layers. The prefix-reads-suffix path (block 3) is argued to be negligible, because caching the prefix barely hurts accuracy.
+
+What it means for the method: you cannot drop the whole suffix, the current block uses it. But it only holds copies of the prefix and current, so a few masks should be enough.
+
+Caveat: the figure has one head and two layers (0 and 31), not consecutive layers $n$ and $n+1$. The write–read cycle is the authors' reading of it ("we conjecture", §3.1), not something the figure measures. The color scale goes negative, so these are scores before softmax, not weights.
+</Annotation>
+
+<Annotation page={6} line={30} text="suffix attention is one to two orders of magnitude smaller than that of prefix or current" color="green">
+**The evidence the method rests on** (Fig. 3, LLaDA-1.5, last layer, 100 GSM8K samples, all heads). Attention from the current block to the suffix:
+
+1. falls off sharply with distance: the first few masks after the block get most of it;
+2. is 10–100× smaller than attention to the prefix or the current block.
+
+Elastic-Cache sees the same thing in Fig. 1a and calls far masks a **length bias**. Read together: near masks are the scratchpad, far masks only say how long the answer is.
+</Annotation>
+
+<Annotation page={7} line={35} text="after a block is generated, all previously dropped-out tokens are restored" color="pink">
+**How the dropout runs.**
+
+- **Eq. 10**: a mask at distance $d \le W$ is kept with probability $a \cdot \varphi(k\,d/W)$, $\varphi$ the standard normal density. $k$ sets how many standard deviations the window spans (decay), $a$ the overall level. Past $W$, nothing is kept. The expected density is about $a/(2k)$: $k=4, a=2$ gives 25%, the math setting.
+- **When**: drawn once before a block starts, then the same subset is used at every step of that block. After the block, all dropped masks come back and a new subset is drawn, so no position is ignored for good.
+- **No scores needed**: the decision depends only on distance, so dropped masks are removed from the input (`x[keep_idx]`) and never computed. Score-based pruning (Sparse-dLLM, P02) must compute attention first.
+
+Compare Elastic-Cache: far masks stay in the sequence with frozen K/V, so they still cost attention reads. DPad removes them.
+</Annotation>
+
+<Highlight page={8} line={30} text="we ensure that each preserved token retains its original positional information" color="pink" />
+
+<Annotation page={9} line={11} text="information collected by distant suffix tokens is insensitive to their" color="blue">
+**Why a random drop does not lose the important mask** (Fig. 4, §3.3). Some far masks get attention spikes. Pruning the 10 largest spikes past position 128 barely changes accuracy: the attention moves to a neighbor (362 → 359).
+
+The reason: a mask has no content of its own. What it holds is written during the forward pass, so any nearby mask can hold it just as well. Prefix tokens are different, their content is tied to their position, which is why prefix pruning needs scores and suffix pruning does not.
+
+The "Diffusion Lottery Tickets" name adds nothing beyond this observation.
+</Annotation>
+
+<Annotation page={16} line={4} text="critical context window of approximately" color="green">
+**How big the window should be** (Fig. 8, LLaDA-1.5, GSM8K at 512).
+
+- The first **64–128** masks after the block matter: keep them dense.
+- Spreading a small budget over a big window hurts. With fewer than 128 kept masks, a larger window loses accuracy.
+- Gaussian beats uniform dropout only when the budget is small. Any decay that favors near masks works about as well.
+
+In the main runs (Table 4), window and density are tuned per model and benchmark: $W$ 128–512, density 20–37.5%. At length 256 a window of 256 covers the whole suffix, so only the dropout is active.
+</Annotation>
+
+<Annotation page={14} line={33} text="To provide a stronger baseline, we augment vanilla with early termination; even under this setting," color="yellow">
+**Reading the speedups.**
+
+- **61.39×** (LLaDA-1.5, GSM8K, 1024 tokens) is against vanilla LLaDA, which writes ~200 tokens of answer and then fills the rest with eos, all of it decoded. Most of the gain is skipping that padding.
+- Against vanilla **with early termination**: 4.8×. Against Fast-dLLM (parallel + prefix cache): 5.2× in Fig. 6. These are the fair numbers for "what suffix dropout buys". (The text says 8.7× over Fast-dLLM here; that number is Dream at 1024 in Fig. 7.)
+- At 256 tokens, gains are small (1.5× alone on LLaDA GSM8K): the prompt is ~80% of the sequence, so the suffix is a small share of the work.
+- Gen. Length drops (LLaDA-1.5 GSM8K: 215 → 156), so throughput rises less than latency improves, as in D2F.
+
+Accuracy: flexible match stays the same. The large gains are in **strict match** (GSM8K, LLaDA-Instruct: 37.4 → 63.8), which checks the answer format. The authors credit fewer distracting far masks. Dream-Base shows no gain.
+</Annotation>
+
+<Annotation page={17} line={21} text="We attribute this behavior to a distributional shift introduced" color="yellow">
+**Where it breaks.** At 2048 tokens, DPad alone costs Dream 7.3 points on HumanEval (56.7 → 49.4, Fig. 7); with Fast-dLLM the loss is smaller.
+
+The cause given: the model was trained with a full, continuous run of masks after the current block. DPad shows it a short, gappy one. The longer the generation, the larger that gap.
+
+Proposed fix, not tested: fine-tune with the same dropout (Eq. 13). Then it is no longer training-free, and it moves toward the models that never see a long masked suffix at all: block diffusion (M08, P03).
+
+§5.2 argues against going all the way: block diffusion drops the suffix entirely, so it loses the scratchpad and any context beyond one block. DPad keeps a few near masks as the middle ground. No experiment compares the two.
+</Annotation>
