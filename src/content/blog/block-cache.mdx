@@ -73,6 +73,8 @@ An exact cache needs a finished block, so block-causal decoding is parallel only
 
 Each step computes more positions, but there are fewer steps. D2F-Dream reaches 119.9 tokens/s on GSM8K, 2.5× LLaMA3-8B. The exact part of the cache is unchanged.
 
+One catch: D2F trains the prompt with full attention, so its prefix does not fit the block-causal prefix cache of models like LLaDA2. MBD-LMs ([my notes](../../papers/mbd-lms/)) get multi-block decoding by post-training a model that is already block-causal, so finished blocks go into the standard cache. Decoding 2 blocks at once raises tokens per forward 1.78×, but each step costs 1.24× more, for 1.44× the throughput at batch 1.
+
 ## What it does not fix
 
 - **It needs a trained model.** The mask has to be learned: from scratch (BD3-LM), from an AR checkpoint (Fast-dLLM v2, SDAR, LLaDA 2.0; M07), or by distillation from a dLLM (D2F). The training-free caches of P01 remain the option for LLaDA and Dream as they are.
@@ -90,3 +92,4 @@ Each step computes more positions, but there are fewer steps. D2F-Dream reaches 
 3. Cheng et al. *SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation*. 2025.
 4. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025. [arXiv](https://arxiv.org/abs/2508.09192)
 5. Wu et al. *Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding*. 2025.
+6. Jin et al. *Multi-Block Diffusion Language Models*. 2026. [arXiv](https://arxiv.org/abs/2606.29215)

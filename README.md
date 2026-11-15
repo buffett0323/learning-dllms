@@ -62,7 +62,14 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | # | Note | Hook | Status |
 | --- | --- | --- | --- |
 | P08 | [Batching denoising steps](https://buffett0323.github.io/learning-dllms/posts/batching/) | Every request is at a different noise level. Can they share a step? | live |
-| P09 | A serving engine for dLLMs | Scheduler, cache manager, sampler: what changes from an AR engine. | planned |
+
+#### Serving engines
+
+| # | Note | Hook | Status |
+| --- | --- | --- | --- |
+| P09 | dLLMs in vLLM and SGLang | Scheduler, KV cache, sampler: what carries over from an AR engine, what bends, and what is new. | planned |
+| P10 | Engines built for dLLMs | dInfer, dLLM-Serve, Flash-dLLM: what they do that general engines do not, yet. | planned |
+| P11 | Attention masks in the kernel | Causal for some requests, bidirectional for others, in the same batch. | planned |
 
 ## Paper notes
 
@@ -79,6 +86,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [Elastic-Cache](https://buffett0323.github.io/learning-dllms/papers/elastic-cache/) | Attention-triggered, layer-aware cache refresh; sliding window with cached far masks | on the PDF |
 | [D2F](https://buffett0323.github.io/learning-dllms/papers/d2f/) | Distill a block-causal dLLM that decodes from unfinished blocks; pipelined parallel decoding | on the PDF |
 | [DPad](https://buffett0323.github.io/learning-dllms/papers/dpad/) | Training-free suffix window + Gaussian distance-decay dropout; suffix as scratchpad | on the PDF |
+| [MBD-LMs](https://buffett0323.github.io/learning-dllms/papers/mbd-lms/) | Multi-block decoding for block diffusion models: MultiTF post-training on small noisy block groups, static-shape Block Buffer | on the PDF |
 
 <!-- ## Writing
 

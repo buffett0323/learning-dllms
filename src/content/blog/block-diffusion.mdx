@@ -84,6 +84,9 @@ Why must block $b+1$ wait for block $b$? Because of how BD3-LM trains. The noisy
 |---|---|---|
 | Block diffusion (BD3-LM, Fast-dLLM v2) | clean | when block $b$ is finished |
 | D2F | noisy, less masked than block $b$ | when block $b$ is partly decoded |
+| MultiTF (MBD-LMs) | clean before a group of 2–4 blocks; inside it, noisy with large gaps | when block $b$ is partly decoded |
+
+**MultiTF** ([my notes](../../papers/mbd-lms/)) sits between the two. At inference, D2F-style decoding usually has only about two active blocks, and their mask ratios are far apart: one nearly done, the next mostly masked. D2F trains on a long run of blocks whose mask ratios rise smoothly, which rarely looks like that. MultiTF post-trains a block diffusion model (LLaDA2, SDAR) on a clean prefix plus a small group of noisy blocks, with random and often large gaps between their mask ratios. With D2F's smooth schedule instead, accuracy drops by about 5 points.
 
 D2F gets its block-causal model by distillation from LLaDA or Dream, and not from an AR checkpoint. That is a separate choice from the forcing.
 
@@ -99,4 +102,5 @@ The larger recent dLLMs are block diffusion models converted from AR checkpoints
 4. Cheng et al. *SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation*. 2025.
 5. Bie et al. *LLaDA2.0: Scaling Up Diffusion Language Models to 100B*. 2025.
 6. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025.
+7. Jin et al. *Multi-Block Diffusion Language Models*. 2026. [arXiv](https://arxiv.org/abs/2606.29215)
 7. Chen et al. *Diffusion Forcing: Next-token Prediction Meets Full-Sequence Diffusion*. NeurIPS 2024.

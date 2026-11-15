@@ -75,7 +75,14 @@ export const tracks: Track[] = [
 				title: 'Serving many requests',
 				notes: [
 					{ slug: 'batching', title: 'Batching denoising steps', hook: 'Every request is at a different noise level. Can they share a step?' },
-					{ slug: 'serving-engine', title: 'A serving engine for dLLMs', hook: 'Scheduler, cache manager, sampler: what changes from an AR engine.' },
+				],
+			},
+			{
+				title: 'Serving engines',
+				notes: [
+					{ slug: 'ar-engines', title: 'dLLMs in vLLM and SGLang', hook: 'Scheduler, KV cache, sampler: what carries over from an AR engine, what bends, and what is new.' },
+					{ slug: 'dllm-engines', title: 'Engines built for dLLMs', hook: 'dInfer, dLLM-Serve, Flash-dLLM: what they do that general engines do not, yet.' },
+					{ slug: 'attention-kernels', title: 'Attention masks in the kernel', hook: 'Causal for some requests, bidirectional for others, in the same batch.' },
 				],
 			},
 		],

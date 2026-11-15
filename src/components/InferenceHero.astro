@@ -3,20 +3,20 @@
 // Every step predicts all blanks (faint guess + confidence bar), then commits the k surest.
 // Early guesses can be wrong ("Lyon") and get replaced once more context is fixed.
 // Loops; shows the finished answer and stops if the reader prefers reduced motion.
-const prompt = ['<user>', 'What', 'is', 'the', 'capital', 'of', 'France', '?', '<assistant>'];
-const answer = ['The', 'capital', 'of', 'France', 'is', 'Paris', '.', '<eos>', '<eos>', '<eos>'];
+const prompt = ['<user>', 'What', 'is', 'the', 'capital', 'of', 'Taiwan', '?', '<assistant>'];
+const answer = ['The', 'capital', 'of', 'Taiwan', 'is', 'Taipei', '.', '<eos>', '<eos>', '<eos>'];
 // Per step: the model's guess and confidence at each still-masked position, and which positions it commits.
 const steps: { pred: Record<number, [string, number]>; commit: number[] }[] = [
 	{
-		pred: { 0: ['The', 0.62], 1: ['capital', 0.41], 2: ['of', 0.55], 3: ['France', 0.48], 4: ['is', 0.58], 5: ['Lyon', 0.21], 6: ['.', 0.7], 7: ['<eos>', 0.96], 8: ['<eos>', 0.97], 9: ['<eos>', 0.98] },
+		pred: { 0: ['The', 0.62], 1: ['capital', 0.41], 2: ['of', 0.55], 3: ['Taiwan', 0.48], 4: ['is', 0.58], 5: ['Kaohsiung', 0.21], 6: ['.', 0.7], 7: ['<eos>', 0.96], 8: ['<eos>', 0.97], 9: ['<eos>', 0.98] },
 		commit: [7, 8, 9],
 	},
 	{
-		pred: { 0: ['The', 0.72], 1: ['capital', 0.5], 2: ['of', 0.6], 3: ['France', 0.52], 4: ['is', 0.66], 5: ['Paris', 0.44], 6: ['.', 0.91] },
+		pred: { 0: ['The', 0.72], 1: ['capital', 0.5], 2: ['of', 0.6], 3: ['Taiwan', 0.52], 4: ['is', 0.66], 5: ['Taipei', 0.44], 6: ['.', 0.91] },
 		commit: [6, 0, 4],
 	},
 	{
-		pred: { 1: ['capital', 0.83], 2: ['of', 0.74], 3: ['France', 0.77], 5: ['Paris', 0.81] },
+		pred: { 1: ['capital', 0.83], 2: ['of', 0.74], 3: ['Taiwan', 0.77], 5: ['Taipei', 0.81] },
 		commit: [1, 5, 3],
 	},
 	{ pred: { 2: ['of', 0.99] }, commit: [2] },
