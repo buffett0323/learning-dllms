@@ -25,4 +25,4 @@ pnpm-debug.log*
 graphify-out/
 
 # papers
-papers/
+/papers/

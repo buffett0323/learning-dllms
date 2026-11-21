@@ -1,0 +1,90 @@
+---
+title: 'd3LLM: Ultra-Fast Diffusion LLM using Pseudo-Trajectory Distillation'
+authors: 'Yu-Yang Qian, Junda Su, Lanxiang Hu, Peiyuan Zhang, Zhijie Deng, Peng Zhao, Hao Zhang'
+venue: 'ICML'
+year: 2026
+url: 'https://arxiv.org/abs/2601.07568'
+hook: 'Learn the decoding order from the teacher, decode several blocks at once, and score speed and accuracy as one curve.'
+readDate: '2026-11-21'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import D3Traj from '../../components/D3Traj.astro';
+
+d3LLM speeds up LLaDA and Dream, both full-attention models, by short distillation (65M tokens). It argues that a dLLM always trades accuracy for parallelism, and that most methods improve only one side. Three parts:
+
+- **A metric** (§2, **AUP**): score a method by its whole accuracy–parallelism curve, not one point.
+- **Training** (§3.1, **pseudo-trajectory distillation**): teach the student to **skip steps**. The teacher decodes one token per step. The student is shown a state from early in the teacher's run and trained to predict, at once, the tokens the teacher only filled several steps later. In those states it becomes confident about more positions, so more pass the threshold per step, more tokens are committed per forward, and the teacher's $n$ steps shrink to fewer.
+- **Inference** (§3.2): multi-block decoding as in D2F, with a periodic KV-cache refresh.
+
+<D3Traj caption="Figure 2 of the paper, step by step. The teacher decodes the current block one token per step (its third token is wrong). Only its order is kept. The mask ratio t then masks the positions it filled last, and the student learns to predict them from the ground truth. Drag t, or switch to random masking to compare." />
+
+Result on LLaDA, GSM8K: 9.11 tokens per forward at 73.1% accuracy, against 1.00 at 72.6% for vanilla LLaDA (Table 1). It comes from the same circle as D2F and MBD-LMs ([notes](../mbd-lms/)), and MBD-LMs adopt its AUP. In my notes: AUP in P04, the distillation in P07, the SGLang port in P09.
+
+<Annotation page={2} line={20} text="unlike AR models, dLLMs naturally live on" color="blue">
+**Why a curve.** Almost every method has a knob that trades accuracy for parallelism: Fast-dLLM's confidence threshold, d3LLM's entropy threshold. Each setting gives one (tokens per forward, accuracy) point, so a method is a curve. A paper can pick the point that looks best, and two papers rarely pick comparable points. Reporting the curve, or one number summarizing it, removes that choice.
+</Annotation>
+
+<Annotation page={3} line={9} text="where the weighting function is defined as" color="blue">
+**AUP.** The area under the accuracy–parallelism curve, with each point weighted by $W(y) = \min(e^{-\alpha(1 - y/y_{\max})}, 1)$, $\alpha = 3$. Points more than 5 below the first point are dropped. Plain area would reward a method that gets fast by letting accuracy collapse; the weight stops that.
+
+Caveats:
+
+- **Tokens per forward, not tokens per second.** A step that runs more positions costs more. MBD-LMs: 1.78× tokens per forward is 1.44× tokens per second.
+- **$y_{\max}$ is the best accuracy among the compared methods.** A method's score changes with what it is compared against. Table 8 shows the ranking survives other weight functions, not other comparison sets.
+- A method reported at a single point gets area $\rho_1 y_1$, so the score also depends on how many points each method reports.
+</Annotation>
+
+<Annotation page={3} line={46} text="To overcome this, we instead use the" color="green">
+**Goal: skip steps.** The student sees a state from the teacher's run and must predict, in one pass, the tokens the teacher filled in the next few steps. At inference it then commits several tokens where the teacher committed one.
+
+**What $\{T_1, \dots, T_n\}$ is.** One trajectory, recorded as $n$ snapshots. The teacher (LLaDA or Dream) unmasks exactly one token per step, past `<eos>` to the full length $n$, so it takes $n$ steps. $T_i$ is the whole sequence after step $i$: $i$ tokens filled, $n - i$ masks. This is done once per prompt, offline, before $t$ plays any role. The rank of a position is the step at which it was filled. In Fig. 2, "usion" was filled before "Diff", and "Diff" before "L", hence 1st, 2nd, 3rd.
+
+**One training input = one snapshot.** Pick a window of $k$ positions starting at $s$ and a mask ratio $t$, and take the snapshot $T_{s+j}$:
+
+1. Before the window: the ground truth, clean.
+2. Inside it: the ground truth where $T_{s+j}$ has a token, `[MASK]` elsewhere. So the visible positions are always the ones the teacher filled **first**.
+3. After it: `[MASK]`.
+4. Cross-entropy on every mask, against the ground truth.
+
+The ground truth supplies the content and the teacher supplies only the order. "Pseudo" because the teacher's own answer may be wrong.
+
+**Formula vs. figure.** The formula takes $T_{s+\lceil kt \rceil}$, which leaves $\lceil kt \rceil$ positions of the window **visible**: 2 of 3 at $t = 0.66$. The figure shows 1 visible, and the text calls $t$ the mask ratio, both of which mean $\lceil kt \rceil$ **masked**. The demo above follows the figure. Either way, the visible positions are the teacher's earliest.
+
+**Why not random masks?** Random masks train on any subset, including states a confidence-ordered decoder never reaches (a hard token visible, an easy one masked). These inputs are the states the decoder does reach. The paper argues this but does not measure the mismatch; MBD-LMs do measure a similar one for multi-block noise.
+
+Two curricula: $t$ grows from 0 to 0.8, so the student skips more and more steps at once, and $k$ from 16 to 32 tokens. A fixed $t = 0.5$ gives 7.49 tokens per forward instead of 9.11 (Table 6).
+
+It also assumes the teacher fills the positions before $s$ first, as LLaDA does when it decodes block by block. Otherwise $T_{s+j}$ does not line up with the window.
+</Annotation>
+
+<Annotation page={4} line={40} text="we create a new Activated block when its" color="pink">
+**Multi-block decoding, close to D2F.** A new block starts, cautiously, when the previous one is 10% done, and decodes at least one token per step once the previous one is 95% done. These are D2F's $\tau_{\text{add}}$ and $\tau_{\text{act}}$ (M08).
+
+The difference is the cache. LLaDA and Dream use full attention, so a finished block's K/V go stale as later blocks change (P01). d3LLM waits 1–2 steps after a block finishes before caching it (Completed but Stabilizing), and refreshes the whole cache every few rounds. MBD-LMs avoid this by starting from block-causal models, where the cache is exact (P03).
+</Annotation>
+
+<Annotation page={8} line={9} text="7.55 ± 0.1 72.1 ± 0.2 517.7 ± 3.9" color="yellow">
+**Where the tokens per forward come from** (Table 5, LLaDA, GSM8K):
+
+| | Tokens per forward | Accuracy |
+|---|---|---|
+| Multi-block decoding + early stop, no distillation | 6.41 | 72.2 |
+| + pseudo-trajectory | 7.55 | 72.1 |
+| + curriculum noise | 8.46 | 69.8 |
+| + curriculum window (full) | 9.11 | 73.1 |
+
+The trajectory adds 18% at the same accuracy. The curriculum on noise costs 2.3 points until the curriculum on window size brings them back.
+
+**What is the baseline?** The table calls the first row "without any distillation components". §3.1 says the 18% is "compared to strategies that use random masking". If the first row is untrained LLaDA, part of the 18% may come from 65M tokens of fine-tuning, not from the teacher's order. Separating the two needs the same data and training with random masks; the paper does not state clearly that this is the comparison.
+</Annotation>
+
+<Annotation page={17} line={22} text="Notably, EAGLE-3 attains the highest overall AUP" color="pink">
+**Speculative decoding still wins on AUP.** EAGLE-3, a draft-and-verify method for AR models, scores higher than d3LLM (Table 14). Verification means its accuracy does not fall as parallelism rises, which is exactly what AUP rewards. The authors note that AUP does not count FLOPs, where speculative decoding may cost more.
+</Annotation>
+
+<Annotation page={18} line={6} text="Qwen-2.5-7B-Instruct / 1 274.7" color="yellow">
+**The speed comparison.** The main tables (Tables 3–4) run every model in HuggingFace Transformers at batch 1: Qwen2.5-7B-Instruct does 57.3 tokens/s on H100 and d3LLM-LLaDA 288.9, 5.0×. In SGLang (App. A.8) both get faster, 108.6 and 545.3, and the ratio holds at 5.0×. The 5.1× row runs d3LLM at batch 4 against Qwen at batch 1, which is not a fair pair: AR throughput grows with batch size too (P08).
+
+The port to SGLang needed bidirectional attention support, the multi-block decoder inside the runtime, and fused kernels (P09).
+</Annotation>
