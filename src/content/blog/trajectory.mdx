@@ -1,0 +1,38 @@
+---
+title: 'Reading the denoising trajectory'
+hook: 'The answer often settles long before the last step. Stop there, or let the steps vote.'
+description: 'Draft. What the sequence of intermediate states in a dLLM decode tells us, and how methods use it: learning a decoding order from it, stopping early, and voting across steps.'
+pubDate: '2026-11-21'
+draft: true
+---
+
+import D3Traj from '../../components/D3Traj.astro';
+
+{/* Draft. Planned sections: early commit (Prophet, "Diffusion Language Models Know the Answer Before Decoding"), voting across steps ("Time Is a Feature"). */}
+
+A dLLM does not produce its answer once. It passes through a **trajectory**: one partly masked state per step, from all masks to the final text (M05). The order in which positions get filled, and how early each settles, is information an AR model does not have.
+
+## Learning the order: pseudo-trajectory distillation
+
+A dLLM trained with random masks (M03) learns nothing about **which** positions it could commit early. At inference, a confidence threshold has to discover that on the fly, and committing more per step means sometimes committing a position too early.
+
+d3LLM (Qian et al., ICML 2026) teaches the student to **skip steps**. The teacher decodes one token per step. The student is shown a state from early in the teacher's run and trained to predict, at once, the tokens the teacher only filled several steps later. At inference it is then confident about more positions in the same state, more pass the threshold per step, more tokens are committed per forward, and the teacher's $n$ steps shrink to fewer.
+
+How a training input is built:
+
+1. **Record the teacher's order.** The teacher (LLaDA or Dream) decodes each training prompt one token per step, past `<eos>` to the full length. Only the **order** in which positions were filled is kept, not the tokens.
+2. **Take one snapshot.** The run is $n$ snapshots $T_1, \dots, T_n$, with $T_i$ the sequence after step $i$. Pick a window of $k$ positions and one snapshot. Inside the window, show the ground truth where that snapshot has a token and mask the rest, so the visible positions are always the ones the teacher filled first. Positions before the window are clean, positions after it masked.
+3. **Train as usual.** Cross-entropy on the masked positions, against the ground truth.
+
+<D3Traj caption="d3LLM's Figure 2, step by step. Drag t, or switch to random masking to compare." />
+
+It is a **pseudo**-trajectory because the teacher's answer may be wrong: its order is used, its content is not. Random masks would also train on states a confidence-ordered decoder never reaches, such as a hard token visible and an easy one masked. These inputs are the states it does reach.
+
+Two curricula keep training stable: the mask ratio grows from 0 to 0.8, and the window from 16 to 32 tokens. The mask-ratio curriculum makes the student skip more steps at once as training goes on. The whole run uses 65M tokens.
+
+On LLaDA, GSM8K: the trajectory alone raises tokens per forward from 6.41 to 7.55 at the same accuracy (72.2 → 72.1). With both curricula it reaches 9.11 at 73.1 (Table 5). Those numbers include d3LLM's multi-block decoder (D2F-style, M08), so the distillation's own share is the first step, about +18%. Whether the baseline row was fine-tuned with random masks on the same data is not clear, so some of that may be the extra training, not the order.
+
+## References
+
+1. Qian et al. *d3LLM: Ultra-Fast Diffusion LLM using Pseudo-Trajectory Distillation*. ICML 2026. [arXiv](https://arxiv.org/abs/2601.07568)
+2. Chen et al. *dParallel: Learnable Parallel Decoding for dLLMs*. 2025.

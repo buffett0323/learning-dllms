@@ -1,0 +1,40 @@
+---
+title: 'dLLMs in vLLM and SGLang'
+hook: 'Scheduler, KV cache, sampler: what carries over from an AR engine, what bends, and what is new.'
+description: 'Draft. Component by component, which parts of an AR serving engine a dLLM can use as is, which need extending, and which are new, for block-causal and full-attention models.'
+pubDate: '2026-11-21'
+draft: true
+---
+
+{/* Draft. Working table: each cell carries its source and evidence level (code > doc > blog > inferred). Upgrade cells to "code" while reading the vLLM DiffusionGemma PR and SGLang's LLaDA2 support. */}
+
+An AR serving engine is built on one assumption: each step, each request moves forward by one token, and what it writes to the KV cache is final. A dLLM breaks it in different places depending on its attention mask. Block-causal models (DiffusionGemma, LLaDA2, SDAR; M08) break it inside the current block only. Full-attention models (LLaDA, Dream) break it everywhere (P01).
+
+## Component by component
+
+| Component | AR engine assumes | Block-causal dLLM | Full-attention dLLM | Source |
+|---|---|---|---|---|
+| Scheduler | one token per request per step | **extend**: a block is rescheduled for many steps without moving; vLLM reuses speculative-decoding accounting (0 sampled, all rejected) | same, whole canvas each step | vLLM blog |
+| Prefill | causal, once | **as is** (encoder mode is causal) | **no**: the prompt sees the canvas, recomputed every step (M04) | vLLM blog, M04 |
+| KV cache, prefix caching | writes are exact | **as is**: the commit pass writes exact K/V (P03) | **new**: approximate cache with refresh (P01) | vLLM blog, P01 |
+| Attention kernel | one mask type per batch | **extend**: per-request causal flag; symmetric sliding window (P11) | bidirectional; SGLang needed support added (d3LLM) | vLLM blog, d3LLM App. A.8 |
+| Sampler | one token per step | **new**: entropy-bound commit, renoise, convergence check | **new**: threshold, remasking (M05) | vLLM blog |
+| Per-request state | KV only | **new**: canvas, phase, self-conditioning (vLLM `ModelState`) | same | vLLM blog |
+| CUDA Graphs | fixed decode shape | fixed canvas; mixed prefill/denoise/commit batches: *unknown* | — | to check |
+| Speculative-decoding path | draft, verify, bonus token | **borrowed**: canvas as an all-or-nothing draft; real spec decoding alongside: *unknown* | — | vLLM blog, RFC #36155 |
+| TP / EP, MoE | — | *inferred* as is (backbone unchanged) | *inferred* as is | to check |
+| Streaming | one token at a time | bursts of a block (256 tokens in DiffusionGemma) | whole answer at once | vLLM blog |
+| Metrics | TTFT, TPOT | TPOT loses meaning; tokens per forward, tokens/s, time per block | same | P08, P04 |
+| Logits memory | $[B, 1, V]$ | $[B, L', V]$ per step | $[B, L, V]$ per step (P08) | P08 |
+
+## Integrations so far
+
+- **vLLM, DiffusionGemma** (June 2026): model runner v2's `ModelState` hooks plus a `DiffusionSampler`; scheduler and runner unchanged.
+- **SGLang, LLaDA2**: block diffusion support added for LLaDA 2.0 (issue #12766).
+- **SGLang, d3LLM** (full attention, LLaDA and Dream based): bidirectional attention added, multi-block decoding inside the runtime, fused kernels. 551 tokens/s on H100 at batch 1 against 108.6 for Qwen2.5-7B-Instruct (d3LLM Table 15).
+
+## References
+
+1. vLLM Team and Google DeepMind. *DiffusionGemma: The First Diffusion LLM (dLLM) Natively Supported in vLLM*. vLLM blog, 2026.
+2. Bie et al. *LLaDA2.0: Scaling Up Diffusion Language Models to 100B*. 2025.
+3. Qian et al. *d3LLM: Ultra-Fast Diffusion LLM using Pseudo-Trajectory Distillation*. ICML 2026.

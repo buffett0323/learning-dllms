@@ -63,11 +63,23 @@ The two middle approaches combine with others. DPad uses the prefix cache with p
 
 ## Reading the speedups
 
-The largest numbers come from long maximum lengths: DPad 61.39× in latency (LLaDA-1.5, GSM8K, 1024 tokens), Elastic-Cache 45.1× in throughput (LLaDA-1.5, GSM8K, 512 tokens). The longer the canvas, the more the baseline pays for a suffix it does not need, and for eos padding after a ~200-token answer. Three things to check:
+The largest numbers come from long maximum lengths: DPad 61.39× in latency (LLaDA-1.5, GSM8K, 1024 tokens), Elastic-Cache 45.1× in throughput (LLaDA-1.5, GSM8K, 512 tokens). The longer the canvas, the more the baseline pays for a suffix it does not need, and for eos padding after a ~200-token answer. Four things to check:
 
 1. **Early termination.** Stop once a block contains eos. Against vanilla with early termination, DPad alone gives 4.8× instead of 20.3×.
 2. **The strongest baseline.** Against Fast-dLLM (parallel decoding + prefix cache), DPad adds 5.2× in that setting.
 3. **Gen. length.** If the method writes shorter answers, latency improves more than throughput. Compare tokens per second, at equal accuracy.
+4. **The same batch size on both sides.** d3LLM's SGLang table runs its model at batch 4 but the AR baseline only at batch 1. At larger batches AR throughput rises too (P08).
+
+**One number for speed and accuracy: AUP.** Most methods have a knob, such as a confidence threshold, that trades accuracy for parallelism. So a method is a curve of (tokens per forward, accuracy) points, not one point. d3LLM's **AUP** (Accuracy Under Parallelism) is the area under that curve, with each point weighted down as its accuracy $y$ falls below the best on the task, $y_{\max}$:
+
+$$
+W(y) = \min\!\left(e^{-\alpha (1 - y / y_{\max})},\, 1\right), \quad \alpha = 3
+$$
+
+Points more than 5 below the first point are dropped. Without a loss in accuracy, AUP is the plain area. MBD-LMs report it too. Two caveats:
+
+- It uses tokens per forward, not tokens per second, so it ignores what a step costs. MBD-LMs raise tokens per forward 1.78× but tokens per second only 1.44×.
+- $y_{\max}$ is the best accuracy among the methods compared, so a method's score changes with the set it is compared against.
 
 <Note kind="question">
 	Freezing keeps the far masks but stops paying for them; dropping removes them. Has anyone compared Elastic-Cache and DPad on the same model, length and baseline? Elastic-Cache came later and does not compare with DPad.
@@ -81,3 +93,4 @@ The largest numbers come from long maximum lengths: DPad 61.39× in latency (LLa
 4. Ma et al. *dKV-Cache: The Cache for Diffusion Language Models*. NeurIPS 2025.
 5. Arriola et al. *Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models* (BD3-LM). ICLR 2025.
 6. Wang et al. *Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing* (D2F). 2025.
+7. Qian et al. *d3LLM: Ultra-Fast Diffusion LLM using Pseudo-Trajectory Distillation*. ICML 2026. [arXiv](https://arxiv.org/abs/2601.07568)
