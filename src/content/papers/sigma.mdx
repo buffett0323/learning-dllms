@@ -1,0 +1,143 @@
+---
+title: 'Large Language Continuous Diffusion Models (Nemotron-Labs-Sigma)'
+authors: 'Zhihan Yang, Wei Guo, Jean-Marie Lemercier, Simon Welker, Mohammad Mahdi Kamani, Yonggan Fu, Sajad Norouzi, Julius Berner, Tomas Geffner, Karsten Kreis, Yongxin Chen, Molei Tao, John Thickstun, Pavlo Molchanov, Ante Jukić, Arash Vahdat, Morteza Mardani'
+venue: 'arXiv'
+year: 2026
+pdf: 'sigma.pdf'
+url: 'https://arxiv.org/abs/2610.02665'
+license: 'CC BY 4.0'
+hook: 'Gaussian noise on 16-dimensional token embeddings, at 3B and 8B, against a masked model trained the same way.'
+readDate: '2026-11-21'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import SpecDecode from '../../components/SpecDecode.astro';
+
+Every other dLLM in these notes is discrete: noise replaces tokens with `[MASK]` or with random tokens (M02). Sigma is **continuous**: each token is mapped to a point in a 16-dimensional embedding space, Gaussian noise is added there, and DDPM or DDIM samplers denoise it, as for images. M12 covers the idea in general; this note is about the paper.
+
+The rest is familiar: block-causal attention with blocks of 32 (M08), initialized from an AR checkpoint (M07), an exact KV cache for finished blocks (P03).
+
+What makes the paper useful is its baseline. **NLD** (Nemotron-Labs-Diffusion) is a masked block diffusion model from the same group, with the same data, architecture, parameters and FLOPs. So the comparison isolates one question: continuous or discrete noise, everything else equal.
+
+<SpecDecode caption="The same 13-token answer, three ways. Time is in toy units, one AR step = 1. Classic speculative decoding: a separate small drafter guesses 4 tokens one after another (0.25 each), the big model checks them in one pass. Self-speculative: the same model's diffusion head drafts a whole block of 8 from noise in one call, and its AR head checks it; each of these passes covers a whole block, so it costs more than an AR step (1.25 here; the paper measures a round at 3.0–3.5 AR steps for blocks of 32). All three output exactly the AR model's greedy text. §6, the last part of the paper." />
+
+<Annotation page={1} line={15} text="the first family of large-scale (3B/8B) continuous dLMs" color="blue">
+**Continuous vs. discrete, in one sentence each.** A masked model holds, at each position, either a token or `[MASK]`, and a token once committed stays. A continuous model holds a point in $\mathbb{R}^{16}$ at every position, and every step moves all of them a little; tokens are read out only at the end of the block.
+
+Earlier continuous LMs (Diffusion-LM, CDCD, Plaid) stayed below about 2B parameters and were not tested on conditional reasoning. Sigma's recipe is Plaid's (App. A), scaled up with the tricks that made masked block models work.
+</Annotation>
+
+<Annotation page={1} line={45} text="Whether continuous dLMs scale to complex conditional reasoning remains open" color="green">
+**Conditional vs. unconditional.**
+
+| | Learns | Used as | Judged by |
+|---|---|---|---|
+| Unconditional | $p(x)$: what text looks like | "write some text", no input | perplexity, whether samples read like real text |
+| Conditional | $p(y \mid x)$: the answer given a prompt | an LLM: question in, answer out | whether the answer is right (GSM8K, HumanEval) |
+
+**Conditional reasoning** is the hard end of the second row: a math or code problem in, a long chain of steps out, judged on the final answer. Earlier continuous models showed fluent samples and good likelihoods. That says little about reasoning, where one wrong number breaks the answer, and a continuous model only fixes its tokens at the end of a block.
+
+In Sigma the condition is simply the clean prefix: the prompt plus the blocks already decoded. Its CFG compares predictions with and without that prefix.
+</Annotation>
+
+<Annotation page={4} line={32} text="During pretraining, we feed the clean discrete tokens" color="green">
+**Two streams, one backbone.** Each training sequence goes in twice:
+
+- **AR stream**: clean tokens with the usual AR embeddings and causal attention, scored with next-token cross-entropy.
+- **Diffusion stream**: the 16-dimensional embeddings of each block plus Gaussian noise, attending bidirectionally inside the block and to the clean blocks before it.
+
+Fig. 2a, for 6 tokens in 3 blocks of 2, diffusion stream from bottom to top:
+
+1. Look up each token's 16-d diffusion embedding $e$.
+2. Add Gaussian noise per block, each block with its own $t$: $z = \alpha_t e + \sigma_t \epsilon$.
+3. Project up to the hidden size, and add the time embedding and, for 25% of samples, the model's own previous prediction (self-conditioning).
+4. Run the shared transformer and get logits over the vocabulary at every position.
+5. Score each block with **one** of two losses, drawn at random: with probability 0.1 the block gets $t = 0$ and a cross-entropy against its tokens ($\mathcal{L}_{\text{rec}}$); otherwise the logits become a predicted embedding $\hat e$ and the loss is its squared error to $e$ ($\mathcal{L}_{\text{diff}}$). Reweighting keeps the estimate unbiased (Eq. 5).
+
+**One forward for both streams** (Fig. 2b). The input is the concatenation $[x^{(1)} x^{(2)} x^{(3)} \mid z^{(1)} z^{(2)} z^{(3)}]$, the same trick as BD3-LM's $[x_t; x_0]$ (M08). Clean tokens attend causally to each other: that is the AR stream. Noisy block $z^{(b)}$ attends to itself and to the clean blocks before it. So the diffusion stream reads its prefix from the AR stream's K/V, which is why the inference cache stores the prefix with AR embeddings.
+
+The AR loss is a regularizer: it keeps training stable and the model close to its AR initialization (Fig. 3c). It also leaves Sigma with a working AR head, which §6 uses as a verifier. Same idea as NLD.
+
+The new parts (16-d embedding table, up-projection, time conditioning, learned noise schedule) are under 1% of the parameters. Training cost: about 9,600 and 19,200 GB200 GPU hours for 3B and 8B, 300B tokens each.
+</Annotation>
+
+<Annotation page={5} line={36} text="unit-norm 16-dimensional diffusion embedding table with a linear up-projection" color="pink">
+**Where tokens become continuous.** Example, with a hidden size of 4096:
+
+1. "cat" → its row of the table $E$ (131,072 × 16): a 16-d vector of length 1.
+2. Add noise in those 16 dimensions: $z = \alpha_t e_{\text{cat}} + \sigma_t \epsilon$.
+3. A linear layer, 16 → 4096, turns $z$ into the transformer's input.
+4. The output is a distribution over the vocabulary, say cat 0.7, dog 0.2, car 0.1. Its average embedding, $\hat e = 0.7\, e_{\text{cat}} + 0.2\, e_{\text{dog}} + 0.1\, e_{\text{car}}$, is the prediction, compared with $e_{\text{cat}}$.
+
+**Why so small, instead of noising the 4096-d AR embeddings?** My reading of the Plaid line of work; the paper does not argue it:
+
+- In 4096 dimensions token embeddings are far apart, so moderate noise leaves the nearest one obvious, and only very large noise hides anything. On a 16-d sphere with 131,072 tokens packed together, every noise level is a different difficulty.
+- The 16-d embeddings are learned through the likelihood and kept at unit length. Not learning them hurts a lot (§2). AR embeddings are neither.
+- The sizes do not match, so the table starts from random and the up-projection connects it to the AR-initialized transformer. All new parts are under 1% of the parameters.
+
+The cost of a small, learned space is collapse: the model ends up using about 5 of the 16 directions (§4.3).
+</Annotation>
+
+<Annotation page={6} line={14} text="the AR embeddings of its committed tokens are appended to" color="pink">
+**The cache is exact, and the commit pass is free.** The prefix is stored with AR embeddings under causal attention, so its K/V never change (P03). When a block is done, its tokens are added to the cache during the **next** block's first denoising step, so writing them costs no extra forward pass. BD3-LM's extra pass (P03) is merged away. DiffusionGemma in vLLM still runs it as a separate commit pass.
+
+**Why AR embeddings, not the 16-d ones?** The paper's reason (§3.2.2): it is how the model was trained. In Fig. 2b the noisy block reads its prefix from the AR stream, clean tokens with AR embeddings and causal attention. The model has never read a prefix written in 16-d embeddings. Further reasons, mine rather than the paper's:
+
+- The prefix is known text. The 16-d space exists to be noised; a clean prefix has no use for it.
+- 16 dimensions are a bottleneck, about 5 in use after collapse (§4.3). The 4096-d AR embeddings carry the full pretrained representation.
+- One cache serves both heads: in §6 the AR head verifies drafts against the same prefix K/V.
+
+The split is: what is known goes through the AR side, what is being generated through the diffusion side. A finished block crosses from one to the other.
+
+Each step: start the block from $\mathcal{N}(0, I)$, predict the clean embedding, take a DDPM or DDIM step. After the last step, read tokens out as the argmax of the logits. NFEs per block = steps + 1.
+</Annotation>
+
+<Annotation page={6} line={44} text="drops the entire clean context" color="blue">
+**CFG: amplify what the context adds.** Every step makes **two** predictions, not one or the other:
+
+- **Conditional** $\hat e(c)$: the block sees the prefix $c$, the prompt and all finished blocks.
+- **Unconditional** $\hat e(\varnothing)$: the same model with all of $c$ removed, so the block sees only itself.
+
+Then $\hat e^{\,w} = \hat e(\varnothing) + w\,[\hat e(c) - \hat e(\varnothing)]$. The difference is what the context contributes: after "2 + 3 =", the unconditional guess is "some number", the conditional one leans to "5". With $w > 1$ that lean is amplified and the generic part subtracted, so predictions follow the context more closely. As with images, the price is diversity.
+
+No context dropout is needed in training: with sequence packing, the first block of a training sequence often starts mid-document with no context, so the model already knows the unconditional case.
+
+Both branches go into one forward pass with a packed mask (Fig. 5a). On H100 at batch 1 that costs 4.2% per step at blocks of 32 (App. E.9, Table 19), almost all of it in the second logit head, not attention. At batch 1 the step is memory-bound, so the extra positions are nearly free. At large batch they double the compute (P08). The paper does not measure that case.
+
+**Score temperature: sharpen, in embedding space.** $\hat e^{\,\tau} = z_t/\alpha_t + \tfrac{1}{\tau}\,[\hat e - z_t/\alpha_t]$ with $\tau \le 1$. $z_t/\alpha_t$ is the naive guess that ignores the noise. ST steps $1/\tau$ times farther along the line from it to the model's prediction. Since $\hat e$ is an average, inside the sphere whenever the model hesitates, this pushes it out toward a single token. The effect is that of a low sampling temperature, sampling from $p^{1/\tau}$, but it acts on the embedding rather than dividing the logits by $T$, and it only sharpens. Logit-space CFG and temperature also work, but less well (App. E.6). ST costs no extra pass.
+
+Both knobs together beat either alone (Fig. 4): tuned alone they need extreme values ($w = 9$ or $\tau = 0.05$); together, $w = 2$ and $\tau = 0.1$ do better.
+</Annotation>
+
+<Annotation page={7} line={59} text="embeddings collapse to approximately 5 effective dimensions" color="green">
+**Embedding collapse.** Trained freely, the 16-d embeddings end up using about 5 directions: a constant embedding is a trivial way to make denoising easy. With fewer usable directions, tokens sit closer together and are easier to confuse when sampling with few steps. Sigma adds a regularizer that pushes the embeddings toward a uniform spread on the sphere. It costs almost nothing in perplexity and mainly helps low-NFE sampling and distillation (Tables 10, 11).
+</Annotation>
+
+<Annotation page={9} line={23} text="88.57 ( ± 0.12) 66.72 ( ± 0.16)" color="yellow">
+**Read the step count.** The best 8B base row (average 71.16, against 70.22 for NLD) uses **256 DDPM steps per 32-token block**: about 8 forward passes per token, 0.125 tokens per forward. With 32 DDIM steps per block, one token per forward, the average is 70.18, level with NLD.
+
+The paper gives no tokens per second for diffusion mode. Its speed results are the distilled model (§5.2) and speculative decoding (§6).
+</Annotation>
+
+<Annotation page={10} line={29} text="with only 8 NFEs (TPF = 4)" color="pink">
+**Few-step distillation.** A continuous model can borrow image-diffusion distillation directly. With distribution-matching distillation (DMD), 8 NFEs per 32-token block (4 tokens per forward) match the 256-step teacher and NLD on GSM8K and HumanEval; MBPP is within 3 points. The student also drops CFG, saving the second branch.
+
+Diversity is kept: pass@$k$ of the 8-NFE student catches up with the 256-NFE teacher at $k = 256$ (Fig. 6). Few-step masked samplers tend to lose diversity; the authors pitch this for RL rollouts.
+</Annotation>
+
+<Annotation page={10} line={40} text="one denoiser call from pure noise drafts a block of" color="blue">
+**Self-speculative decoding.** One model, two roles:
+
+1. **Draft**: one diffusion call from pure noise proposes a whole block of 32 tokens.
+2. **Verify**: the AR stream scores the block in one causal pass, keeps the longest prefix that matches its own greedy choice, and adds one token of its own.
+
+Two forward passes commit the accepted length plus one. On one GB200 in SGLang, at batch 1, the distilled 8B models accept 7–12 tokens per round and run 2.4–4.2× faster than their own AR decoding (Fig. 9). Against NLD drafting the same way, they accept 14–23% more tokens per round without any drafter training, and 21–33% more with a short acceptance fine-tune (Table 3). P06 compares this with other ways of drafting and correcting.
+</Annotation>
+
+<Annotation page={11} line={36} text="the accuracy remains that of the AR mode in each model" color="yellow">
+**Whose accuracy?** Verification returns the AR stream's greedy output, so accuracy is that of **AR mode**, not diffusion mode: for Sigma-8B base, 67.48 against 71.16 (Table 2). And the speedup is against the **same model's** AR decoding, not against a separate AR model.
+</Annotation>
+
+<Annotation page={11} line={42} text="the average performance of Sigma - instruct models is on par with NLD" color="yellow">
+**After SFT: on par, not ahead.** The abstract says Sigma outperforms discrete models after SFT on MATH-500 and AIME. Against NLD that does not hold: 8B instruct in diffusion mode averages 59.14 against 59.92, with MATH-500 at 78.4 against 84.6 and AIME24 at 23.3 against 30.0 (Table 5). The clear wins are over LLaDA and Dream. This sentence of the paper says it correctly: on par.
+</Annotation>

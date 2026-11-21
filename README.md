@@ -36,6 +36,12 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | M10 | Constrained decoding | Grammars, when the order is not left to right. | planned |
 | M11 | Reinforcement learning for dLLMs | Policy gradients without a tractable likelihood. | planned |
 
+#### Beyond masks
+
+| # | Note | Hook | Status |
+| --- | --- | --- | --- |
+| M12 | [Continuous diffusion on embeddings](https://buffett0323.github.io/learning-dllms/posts/continuous-diffusion/) | Gaussian noise for a vocabulary after all: put the tokens in a small space first. | live |
+
 ### Into Production
 
 <!-- What it takes to serve a diffusion LLM fast and cheaply. -->
@@ -88,6 +94,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [DPad](https://buffett0323.github.io/learning-dllms/papers/dpad/) | Training-free suffix window + Gaussian distance-decay dropout; suffix as scratchpad | on the PDF |
 | [MBD-LMs](https://buffett0323.github.io/learning-dllms/papers/mbd-lms/) | Multi-block decoding for block diffusion models: MultiTF post-training on small noisy block groups, static-shape Block Buffer | on the PDF |
 | [d3LLM](https://buffett0323.github.io/learning-dllms/papers/d3llm/) | Pseudo-trajectory distillation, D2F-style multi-block decoding with KV refresh, the AUP metric | text only (license) |
+| [Nemotron-Labs-Sigma](https://buffett0323.github.io/learning-dllms/papers/sigma/) | Continuous diffusion on 16-d embeddings at 3B/8B against a matched masked model; packed CFG, DMD distillation, self-speculative decoding | on the PDF |
 
 <!-- ## Writing
 

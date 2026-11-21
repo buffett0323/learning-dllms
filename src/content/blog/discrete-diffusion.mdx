@@ -12,8 +12,8 @@ Every diffusion model has two halves. A fixed **forward process** destroys data 
 
 For images, "a little noise" means adding a small Gaussian to every pixel. A token ID has no "a little": token 2012 plus 0.1 is not a word. There are two ways out:
 
-- **Diffuse in embedding space**, then round back to tokens (Diffusion-LM). Rounding adds errors, and at scale this line has trailed the other.
-- **Diffuse in token space**: noise means **replacing tokens**. This is the line every current dLLM follows, and the rest of this note.
+- **Diffuse in embedding space**, then round back to tokens (Diffusion-LM). Rounding adds errors, and for years this line trailed the other. Nemotron-Labs-Sigma (2026) has since brought it to 8B parameters, level with a matched masked model (M12).
+- **Diffuse in token space**: noise means **replacing tokens**. This is the line LLaDA, Dream and most later dLLMs follow, and the rest of this note.
 
 ## Noise as a transition matrix
 

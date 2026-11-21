@@ -1,0 +1,145 @@
+---
+title: 'Continuous diffusion on embeddings'
+hook: 'Gaussian noise for a vocabulary after all: put the tokens in a small space first.'
+description: 'The other route M02 set aside: map tokens to low-dimensional embeddings, add Gaussian noise there, and denoise with image-diffusion samplers. How it works, how it differs from masking, and what Nemotron-Labs-Sigma shows at 3B and 8B against a matched masked model.'
+pubDate: '2026-11-21'
+---
+
+import ContinuousToy from '../../components/ContinuousToy.astro';
+import Note from '../../components/Note.astro';
+
+M02 began with a problem: a token ID has no "a little noise". It took the route every model since LLaDA follows, noise as **replacing tokens**, and set the other one aside: move tokens into a continuous space and add Gaussian noise there. That route trailed for years. Nemotron-Labs-Sigma (NVIDIA, 2026; [my notes](../../papers/sigma/)) brings it to 3B and 8B parameters and compares it with a masked model trained the same way.
+
+## Tokens as points
+
+The recipe Sigma uses comes from Plaid (Gulrajani and Hashimoto, 2023):
+
+1. **Embed.** Each token gets a learned vector $e \in \mathbb{R}^{16}$, normalized to the unit sphere. 16 dimensions, against a vocabulary of 131,072 tokens.
+2. **Add noise.** As in image diffusion: $z_t = \alpha_t e + \sigma_t \epsilon$, with $\epsilon \sim \mathcal{N}(0, I)$ and $\alpha_t^2 + \sigma_t^2 = 1$. At $t = 1$ it is pure noise. The schedule is learned.
+3. **Predict a distribution, not a point.** The network outputs probabilities over the vocabulary at every position, $x_\theta$, like any LM. The predicted clean embedding is their average, $\hat e = x_\theta E$, a point on or inside the sphere. This is **categorical reparameterization**: the model stays a classifier, and the continuous prediction is derived from it.
+4. **Denoise.** A DDPM or DDIM step moves $z_t$ toward $\hat e$. Repeat to $t = 0$.
+5. **Read out.** Take the argmax of the final logits as the tokens.
+
+Three symbols do all the work:
+
+| Symbol | What it is | Where it comes from |
+|---|---|---|
+| $e$ | the true answer: the token's embedding | a row of the table $E$ |
+| $z_t$ | the current noisy state | in training, $e$ plus noise; at inference, pure noise at first, then updated every step |
+| $\hat e$ | the model's guess of $e$ | the transformer's output, given $z_t$ and the prefix |
+
+- **Training:** $e$ is known. Add noise to get $z_t$, let the model predict $\hat e$, and push $\hat e$ toward $e$.
+- **Inference:** $e$ is unknown. Start from pure noise $z_1$. At each step, predict $\hat e$ and let DDPM or DDIM move $z$ a little toward it. At $t = 0$, read out the token.
+
+Training minimizes a likelihood bound, mostly a squared error between $\hat e$ and the true embedding, plus a cross-entropy term at $t = 0$. Like the masked loss in M03, it bounds $-\log p_\theta(x)$.
+
+### From 16 numbers back to a token
+
+The 16-d vector is never decoded on its own. The transformer does the decoding, and the embedding table is used the other way. For one position, with Sigma's sizes:
+
+1. $z_t$, 16 numbers, goes through a linear **up-projection** to the hidden size (4096), plus a time embedding and the previous step's $\hat e$ (self-conditioning).
+2. The transformer reads it together with the block and the cached prefix, and gives a 4096-d hidden state.
+3. A **diffusion logit head**, separate from the AR head, maps it to 131,072 logits; softmax gives $x_\theta$.
+
+Then:
+
+- **During denoising**, $\hat e = x_\theta E$ maps the 131,072 probabilities back to 16 numbers, for the DDPM or DDIM step.
+- **At the last step**, the argmax of the logits is the token.
+
+| Direction | Done by |
+|---|---|
+| 16-d → vocabulary | up-projection, transformer, logit head (4096 × 131,072) |
+| vocabulary → 16-d | the probabilities times the table $E$ (131,072 × 16) |
+
+A toy, in 2 dimensions with 3 tokens on the unit circle: cat $= (1, 0)$, dog $= (0.8, 0.6)$, car $= (-1, 0)$. Context: "The ___ barked".
+
+- Some step has $z_t = (0.6, 0.3)$, between cat and dog.
+- The transformer reads "barked" and outputs cat 0.15, dog 0.80, car 0.05.
+- $\hat e = 0.15 \cdot \text{cat} + 0.80 \cdot \text{dog} + 0.05 \cdot \text{car} = (0.74, 0.48)$, and DDIM moves $z$ toward it, so toward dog.
+- At $t = 0$ the argmax is dog.
+
+What picks dog over cat is the context, read by the transformer, not which embedding $z_t$ happens to be nearest.
+
+<ContinuousToy caption="The toy above, run with DDIM over 8 steps. The model's logits are context logits (from the sentence) plus the output prior below, whose weight α/σ² grows as the noise falls. Switch the context to see it decide the token; with no context, only the prior is left, and the token is whichever embedding the noise drifts toward. Try New noise." />
+
+**Nearest still matters at the end.** Plaid adds an **output prior** to the logits (Sigma has it in Fig. 2a but does not spell it out; this is Plaid's version). It is the posterior of each token $v$ given $z_t$ alone, with no context:
+
+$$
+\log p(v \mid z_t) = \frac{\alpha_t}{\sigma_t^2} \, z_t \cdot e_v + \text{const}
+$$
+
+The constant holds because every $e_v$ has length 1. At high noise $\alpha_t / \sigma_t^2$ is small and the prior hardly counts. Near $t = 0$ it is large and dominates: the readout becomes "the token whose embedding is nearest to $z$". So the transformer does not have to learn that geometry and can spend itself on the context.
+
+**Cost.** Every step computes the full 131,072 logits at every position of the block. A masked model does too, so this is no difference. Only $\times E$ is extra, and $E$ is 16 wide. In Sigma-3B on H100, logits plus this product take about 1 ms of a 19 ms step.
+
+## What changes against masking
+
+| | Masked (M03–M05) | Continuous |
+|---|---|---|
+| State at a position | a token or `[MASK]` | a point in $\mathbb{R}^{16}$ |
+| One step | commits some positions for good | moves every position a little |
+| When tokens appear | gradually, step by step | all at once, after the last step of the block |
+| Order inside a block | chosen by the sampler (confidence) | none: the whole block moves together |
+| Sampler | confidence or threshold rules (M05) | DDPM, DDIM: ODE and SDE solvers |
+| Steering | logit tricks | classifier-free guidance, score temperature |
+| Few-step decoding | threshold and parallel decoding (P05) | distillation methods from image diffusion |
+
+The first three rows are the main point. A masked model makes a hard decision per position per step; an early mistake stays (M02). A continuous model keeps every position soft until the end of the block, so nothing is committed early, and nothing gets fixed early either.
+
+The last three rows are why people keep trying. The tools built for image diffusion apply almost as they are: ODE solvers, guidance, and distillation into a few steps.
+
+## At inference time
+
+**One step costs about the same.** Both run the same transformer over the same block. The continuous model adds a small up-projection from 16 dimensions and turns the vocabulary probabilities into an embedding, which in Sigma-3B takes about 1 ms of a 19 ms step on H100 (App. E.9). The exception is guidance: packed classifier-free guidance doubles the positions per step. At batch 1 that costs 4% because the step is memory-bound; at large batch it costs close to 2× (P08).
+
+**The number of steps is what differs.**
+
+- **Masked: adaptive.** A confidence threshold commits many tokens where the model is sure (boilerplate, the `<eos>` tail) and few where it is not (M05, P05). Steps follow the content.
+- **Continuous: fixed in advance.** Every position moves at every step, and tokens appear only after the last step of the block. An easy block takes as many steps as a hard one. Without distillation, quality drops below about 16 steps per 32-token block (Sigma Fig. 7): 32 steps is about one token per forward, as slow as AR, and the best scores use 256. Distilled to 8 steps, it reaches four tokens per forward.
+
+Sigma reports no tokens per second in diffusion mode, so the wall-clock gap to a masked model is not measured.
+
+**What else changes for a serving engine:**
+
+| | Masked | Continuous |
+|---|---|---|
+| Cache inside the current block | possible, approximate: committed tokens stop changing (P03) | impossible: every position changes every step |
+| Cache of finished blocks | exact (block-causal) | exact, the same |
+| Stopping at `<eos>` | as soon as `<eos>` is committed | only at the end of the block |
+| Per-request sampling state | token IDs and the mask | 16 floats per position, plus the previous prediction for self-conditioning (16 more) |
+| Steps per block | varies by request and by block | the same for every request and block |
+| Knobs exposed to the user | threshold, block size | steps, guidance strength $w$, score temperature $\tau$ |
+
+Two of these favor the continuous model. Its sampling state is small: DiffusionGemma in vLLM keeps each position's full softmax from the previous step for self-conditioning, a vector of vocabulary size, while Sigma keeps 16 numbers. And fixed steps make scheduling predictable: every request advances on the same beat, so the batching problem of P08, requests at different noise levels needing different work, is simpler.
+
+## Why it trailed, and what changed
+
+Continuous text models stayed small, below about 2B parameters, and were mostly tested on unconditional generation. Sigma adds the pieces that made masked block models work:
+
+- **Block-causal attention** (M08), blocks of 32. The prefix is clean and exactly cached; only the current block is continuous.
+- **An AR initialization** (M07). The new parts, the 16-d table, an up-projection and time conditioning, are under 1% of the parameters.
+- **An AR loss alongside**. Each sequence also goes through the same network as clean tokens with causal attention and next-token loss. This stabilizes training, and leaves the model with a working AR head.
+
+One problem is specific to the continuous route: the embeddings **collapse**. Left alone, the 16 dimensions end up used as about 5, because nearly identical embeddings make denoising easy. Then tokens are close together and easy to confuse with few sampling steps. Sigma regularizes the embeddings toward a uniform spread on the sphere.
+
+## The matched comparison
+
+NLD is a masked block diffusion model from the same group, with the same data, architecture and size. Against it (Sigma Tables 2 and 5, 8B):
+
+- **Base models**: 71.16 against 70.22 on average over math and code, but at 256 steps per 32-token block, 8 forward passes per token. At 32 steps per block, one token per forward, it is 70.18: level.
+- **After SFT**: 59.14 against 59.92. On par. NLD stays ahead on MATH-500 and AIME.
+- **Few steps**: distilled to 8 forward passes per block, 4 tokens per forward, Sigma matches the 256-step version on GSM8K and HumanEval. The image-diffusion distillation (DMD) transfers.
+
+So at this scale, continuous noise is not better than masking, and not worse. Its case rests on the tools in the table above, not on accuracy.
+
+<Note kind="question">
+	Can a continuous block stop early when it is done? DiffusionGemma stops a block once its argmax readout has not changed for a few steps and its entropy is low. The same check would work on Sigma's readout, giving back some of the adaptivity masked decoding has. And how much does packed guidance cost at the batch sizes a server runs?
+</Note>
+
+## References
+
+1. Yang et al. *Large Language Continuous Diffusion Models* (Nemotron-Labs-Sigma). 2026. [arXiv](https://arxiv.org/abs/2610.02665)
+2. Gulrajani and Hashimoto. *Likelihood-Based Diffusion Language Models* (Plaid). NeurIPS 2023.
+3. Li et al. *Diffusion-LM Improves Controllable Text Generation*. NeurIPS 2022.
+4. Dieleman et al. *Continuous Diffusion for Categorical Data* (CDCD). 2022.
+5. Fu et al. Nemotron-Labs-Diffusion (NLD). 2026. Cited as the masked baseline in Sigma.

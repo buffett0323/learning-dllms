@@ -45,6 +45,12 @@ export const tracks: Track[] = [
 					{ slug: 'rl', title: 'Reinforcement learning for dLLMs', hook: 'Policy gradients without a tractable likelihood.' },
 				],
 			},
+			{
+				title: 'Beyond masks',
+				notes: [
+					{ slug: 'continuous-diffusion', title: 'Continuous diffusion on embeddings', hook: 'Gaussian noise for a vocabulary after all: put the tokens in a small space first.' },
+				],
+			},
 		],
 	},
 	{
