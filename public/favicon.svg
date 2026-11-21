@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <style>.a{fill:#c2410c}.m{fill:#d9d4ca}@media (prefers-color-scheme:dark){.a{fill:#f08a4b}.m{fill:#4a4640}}</style>
-  <rect class="a" x="3" y="3" width="12" height="12" rx="3"/>
-  <rect class="m" x="17" y="3" width="12" height="12" rx="3"/>
-  <rect class="m" x="3" y="17" width="12" height="12" rx="3"/>
-  <rect class="a" x="17" y="17" width="12" height="12" rx="3"/>
+  <!-- Three lines of tokens, filled out of order: orange = decoded, beige = still [MASK]. -->
+  <style>.a{fill:#c2410c}.m{fill:#cbc4b7}@media (prefers-color-scheme:dark){.a{fill:#f08a4b}.m{fill:#4a4640}}</style>
+  <rect class="a" x="2" y="4" width="10" height="6" rx="2"/>
+  <rect class="m" x="14" y="4" width="16" height="6" rx="2"/>
+  <rect class="m" x="2" y="13" width="15" height="6" rx="2"/>
+  <rect class="a" x="19" y="13" width="11" height="6" rx="2"/>
+  <rect class="a" x="2" y="22" width="19" height="6" rx="2"/>
+  <rect class="m" x="23" y="22" width="7" height="6" rx="2"/>
 </svg>

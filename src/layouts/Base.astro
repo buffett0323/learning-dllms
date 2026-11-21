@@ -28,6 +28,8 @@ const section = path.startsWith('about') ? 'about' : path.startsWith('papers') ?
 		<meta name="description" content={description} />
 		<link rel="canonical" href={canonicalURL} />
 		<link rel="icon" type="image/svg+xml" href={withBase('/favicon.svg')} />
+		<meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)" />
+		<meta name="theme-color" content="#141312" media="(prefers-color-scheme: dark)" />
 		<link rel="sitemap" href={withBase('/sitemap-index.xml')} />
 		<link rel="alternate" type="application/rss+xml" title={site.name} href={new URL(withBase('/rss.xml'), Astro.site)} />
 		<meta property="og:type" content="website" />
@@ -52,10 +54,12 @@ const section = path.startsWith('about') ? 'about' : path.startsWith('papers') ?
 			<div class="topbar-inner">
 				<a class="brand" href={withBase('/')}>
 					<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-						<rect class="on" x="3" y="3" width="12" height="12" rx="3"></rect>
-						<rect x="17" y="3" width="12" height="12" rx="3"></rect>
-						<rect x="3" y="17" width="12" height="12" rx="3"></rect>
-						<rect class="on" x="17" y="17" width="12" height="12" rx="3"></rect>
+						<rect class="on" x="2" y="4" width="10" height="6" rx="2"></rect>
+						<rect style="--d: 2" x="14" y="4" width="16" height="6" rx="2"></rect>
+						<rect style="--d: 0" x="2" y="13" width="15" height="6" rx="2"></rect>
+						<rect class="on" x="19" y="13" width="11" height="6" rx="2"></rect>
+						<rect class="on" x="2" y="22" width="19" height="6" rx="2"></rect>
+						<rect style="--d: 1" x="23" y="22" width="7" height="6" rx="2"></rect>
 					</svg>
 					{site.name}
 				</a>
@@ -139,15 +143,21 @@ const section = path.startsWith('about') ? 'about' : path.startsWith('papers') ?
 		height: 1.15rem;
 	}
 	.brand-mark rect {
-		fill: var(--mask);
-		transition: fill 250ms;
+		fill: var(--mask-hatch);
+		transition: fill 200ms;
 	}
 	.brand-mark rect.on {
 		fill: var(--accent);
 	}
-	/* The mark "denoises" on hover. */
+	/* The mark "denoises" on hover: the remaining masks fill in one by one, out of order. */
 	.brand:hover .brand-mark rect {
 		fill: var(--accent);
+		transition-delay: calc(var(--d, 0) * 90ms);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.brand:hover .brand-mark rect {
+			transition-delay: 0ms;
+		}
 	}
 	.topnav {
 		display: flex;
