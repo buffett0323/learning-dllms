@@ -1,31 +1,14 @@
 ---
 title: 'Draft, verify, remask'
 hook: 'Commit aggressively, then let bidirectional context take the wrong ones back.'
-description: 'Draft. Ways to commit tokens fast and correct them afterwards: a dLLM drafting for an AR verifier, and a dLLM editing its own committed tokens.'
+description: 'Draft. Ways for a dLLM to commit tokens fast and take wrong ones back: editing committed tokens, revokable decoding.'
 pubDate: '2026-11-21'
 draft: true
 ---
 
-import SpecDecode from '../../components/SpecDecode.astro';
-
 {/* Draft. Planned: WINO (wide-in, narrow-out revokable decoding), Saber; a comparison table of who drafts, who checks, and what the output guarantees. */}
 
-Parallel decoding (P05) commits several tokens per step and accepts some risk. There are two ways to commit fast and fix mistakes afterwards: let another model check the draft, or let the dLLM revise its own committed tokens.
-
-## A dLLM drafts, an AR head verifies
-
-Speculative decoding for AR models drafts a few tokens cheaply, then the target model checks them all in one forward pass and keeps the longest prefix it agrees with. A block diffusion model is a natural drafter: one call proposes a whole block.
-
-Nemotron-Labs-Sigma ([notes](../../papers/sigma/)) and NLD do this inside **one** model. Both are trained with an AR loss next to the diffusion loss (M12), so the same backbone has a causal AR head. One round:
-
-1. **Draft**: one diffusion call from pure noise proposes a block of 32 tokens. Sigma uses its distilled few-step model, so one call is enough.
-2. **Verify**: the AR head scores the block in one causal pass and keeps the longest prefix that matches its own greedy tokens, plus one token of its own.
-
-<SpecDecode caption="The same 13-token answer, three ways. Time is in toy units, one AR step = 1. Classic speculative decoding: a separate small drafter guesses 4 tokens one after another (0.25 each), the big model checks them in one pass. Self-speculative: the same model's diffusion head drafts a whole block of 8 from noise in one call, and its AR head checks it; each of these passes covers a whole block, so it costs more than an AR step (1.25 here; the paper measures a round at 3.0–3.5 AR steps for blocks of 32). All three output exactly the AR model's greedy text." />
-
-Two forward passes commit the accepted length plus one. On one GB200, batch 1, the 8B models accept 7–12 tokens per round and run 2.4–4.2× faster than their own AR decoding (Sigma Fig. 9).
-
-What it guarantees: the output **is** the AR head's greedy output. So the accuracy is that of AR mode, not of diffusion mode, and diffusion only buys speed. For Sigma-8B that is 67.48 instead of 71.16 on its base benchmarks (Sigma Table 2).
+Parallel decoding (P05) commits several tokens per step and accepts some risk. This note is about letting the dLLM revise its own committed tokens. Letting another model check the draft is speculative decoding, in the S track (S01).
 
 ## The dLLM edits its own tokens
 
@@ -35,6 +18,4 @@ Here nothing outside the dLLM checks the result, so the output keeps diffusion-m
 
 ## References
 
-1. Yang et al. *Large Language Continuous Diffusion Models* (Nemotron-Labs-Sigma). 2026. [arXiv](https://arxiv.org/abs/2610.02665)
-2. Bie et al. *LLaDA2.1: Speeding Up Text Diffusion via Token Editing*. 2026. [arXiv](https://arxiv.org/abs/2602.08676)
-3. Leviathan et al. *Fast Inference from Transformers via Speculative Decoding*. ICML 2023.
+1. Bie et al. *LLaDA2.1: Speeding Up Text Diffusion via Token Editing*. 2026. [arXiv](https://arxiv.org/abs/2602.08676)

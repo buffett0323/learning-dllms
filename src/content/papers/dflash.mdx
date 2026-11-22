@@ -1,0 +1,88 @@
+---
+title: 'DFlash: Block Diffusion for Flash Speculative Decoding'
+authors: 'Jian Chen, Yesheng Liang, Zhijian Liu'
+venue: 'ICML'
+year: 2026
+pdf: 'dflash.pdf'
+url: 'https://arxiv.org/abs/2602.06036'
+license: 'CC BY 4.0'
+hook: 'A five-layer block diffusion drafter, fed with the target model''s hidden features, guesses 16 tokens in one pass.'
+readDate: '2026-11-21'
+---
+
+import Annotation from '../../components/Annotation.astro';
+import SpecDecode from '../../components/SpecDecode.astro';
+
+Speculative decoding speeds up an **AR** model: a cheap drafter guesses several tokens, the target model checks them all in one pass, and the output is exactly what the target would have written alone. DFlash keeps the target AR and changes the drafter: instead of a small AR model that guesses one token per pass, a small **block diffusion** model guesses a whole block of 16 in one pass.
+
+A dLLM is a weak writer on its own (M06, M12). As a drafter it does not need to be good, only often right, because every guess is checked. That is the paper's reframing.
+
+Three ingredients:
+
+- **Parallel drafting**: a masked block of 16 positions, filled in **one** denoising step.
+- **The target's features**: hidden states from 5 layers of the target, fused and injected as extra keys and values into every drafter layer.
+- **Training for the job**: blocks that start from a clean token, as at inference, and a loss that weights early positions more.
+
+<SpecDecode show={['ar', 'classic', 'dflash']} caption="One answer, three ways, in toy cost units (one step of the big model = 1). Classic speculative decoding: a small AR drafter guesses 4 tokens, one pass each. DFlash: a small diffusion drafter guesses a block of 8 in one pass, and the big model checks it. All three output the big model's greedy text." />
+
+<Annotation page={2} line={41} text="insight is simple: the target knows best" color="blue">
+**The drafter is an adapter on the target, not a model of its own.** It has 5 transformer layers and shares the target's token embedding and LM head, both frozen; only the 5 layers are trained. What it predicts from is mostly the target's own hidden states, which already encode information about the next several tokens.
+
+Without them it is just a small dLLM, and the speedup falls to about 2–3× (App. A.2, Table 10), the range of earlier diffusion drafters. Large standalone diffusion drafters (DiffuSpec, SpecDiff-2, 7B) accept more but cost too much to draft with: about 3–4×.
+</Annotation>
+
+<Annotation page={3} line={26} text="costs therefore grow linearly with the speculation budget" color="green">
+**Why parallel drafting changes the design.** Per committed token, the time is
+
+$$
+L = \frac{T_{\text{draft}} + T_{\text{verify}}}{\tau},
+$$
+
+with $\tau$ the tokens committed per round (accepted plus the target's own). An AR drafter pays $T_{\text{draft}} = \gamma \cdot t_{\text{step}}$ for $\gamma$ guesses, so it must stay tiny (EAGLE-3: one layer), and its acceptance saturates. A diffusion drafter pays about one pass whatever $\gamma$ is, so it can afford more layers. Fig. 3: a 5-layer DFlash drafting 16 tokens costs less than a 1-layer EAGLE-3 drafting 8, and it is accepted more.
+
+The same trade decides P05's parallel decoding; here it moves into the drafter.
+</Annotation>
+
+<Annotation page={4} line={51} text="information and directly inject it into the Key and Value" color="green">
+**KV injection.** During the target's normal forward pass, take the hidden states of 5 layers spread from shallow to deep, concatenate them, and project once to the drafter's width (App. A.3). In every drafter layer, these features become extra **keys and values**. The draft positions attend to them; they never pass through the drafter's own layers.
+
+EAGLE-3 instead adds the features to the drafter's **input** only, and they fade as the drafter gets deeper. Table 9 isolates this: with the same 5-layer drafter, KV injection beats input injection for AR drafting (acceptance 4.8 vs. 4.2 on GSM8K) and for diffusion drafting (4.2 vs. 3.5).
+
+Cost: one projection matrix, about 42 MB for a 35B target, and the injected features are cached and reused across rounds. For a serving engine it means the drafter needs the target's intermediate hidden states every step, not just its tokens (P09).
+</Annotation>
+
+<Annotation page={5} line={7} text="We randomly sample anchor tokens" color="pink">
+**Training matches the job.**
+
+- **Anchored blocks.** At inference every draft block starts right after a clean token, the target's own token from the last round. So training blocks start at a random clean "anchor" and mask the 15 positions after it, instead of masking random positions inside fixed blocks. Table 13: 4.94 → 5.64 accepted tokens on MATH-500.
+- **Early positions count more.** One wrong token rejects everything after it, so the loss at position $k$ of a block is weighted by $e^{-(k-1)/\gamma}$. Faster and better convergence (Fig. 5).
+- **Target's own outputs.** The 800K training responses are regenerated by the target model, so the drafter learns to predict the target, not the dataset.
+
+One denoising step means the 16 guesses are independent given the context, so accuracy falls along the block: the same problem as committing many tokens at once (M05, P05). The loss weighting is one answer; DFlash 2 (S03), DSpark (S04) and draft trees (S05) are others.
+</Annotation>
+
+<Annotation page={6} line={13} text="DFlash (16) 5.15 × 6.54 6.08 × 7.87" color="yellow">
+**The headline numbers.** Qwen3-8B, greedy: DFlash averages 4.9× over plain AR decoding with 6.5 accepted tokens per round, against 1.8–2.0× for EAGLE-3. That is where "up to 2.5× over EAGLE-3" comes from.
+
+These runs use the **Transformers backend at batch 1**, where every step is memory-bound and slow, so drafting is very cheap relative to it. Two later tables give a more serving-like picture: SGLang at higher concurrency (p.7) and a same-data comparison on SGLang (p.8).
+</Annotation>
+
+<Annotation page={7} line={21} text="5.1 × 4.5 × 4.5 × 3.9 × 2.8 ×" color="yellow">
+**The speedup shrinks as load rises.** SGLang on one B200, Qwen3-8B, MATH-500: 5.1× with 1 request in flight, 2.8× with 32. On HumanEval, 4.2× → 2.4×. vLLM shows the same, 4.0× → 1.9× (App. A.4, Table 12).
+
+The reason is P08's roofline. Verifying 16 drafted positions per request is nearly free when the step is memory-bound. With 32 requests the step becomes compute-bound, and every rejected position takes compute another request could have used. The authors suggest smaller blocks under load and leave it to future work (p.9). DSpark takes it up (S04, S07).
+</Annotation>
+
+<Annotation page={8} line={29} text="EAGLE-3 (60) 1.9 × 1.6 × 1.3 × 0.9 × 0.6 ×" color="pink">
+**A fairer comparison, and a warning.** LLaMA-3.1-8B, both drafters trained on the same data, both served by SGLang. At one request DFlash gives 2.4× against EAGLE-3's 1.9×, about 1.3× better, not 2.5×.
+
+At 32 requests, EAGLE-3 with a 60-node tree runs at **0.6×**: slower than no speculation at all, because the tree's 60 positions are verified for every request. A 10-node tree holds 1.0×; DFlash holds 1.6×. Speculation is not free under load, and how much to verify per request becomes a scheduling decision.
+</Annotation>
+
+<Annotation page={9} line={35} text="large blocks can increase verification cost" color="blue">
+**Block size is a serving knob.** A drafter trained with blocks of 16 still works when asked for 8; one trained with 8 does not stretch to 16 (Table 8). So one drafter could change its block size with load, long blocks when idle, short ones when busy. Not done here.
+</Annotation>
+
+<Annotation page={12} line={32} text="Qwen3.5-4B MTP 6.5 / 1.5 ×" color="green">
+**Against built-in multi-token prediction.** Qwen3.5 ships MTP heads, which also draft several tokens but one after another. On MATH-500 both accept about the same number per round (6.5 for MTP, 7.1 for DFlash), yet the speedups are 1.5× and 3.0×. The difference is drafting cost: same acceptance, one pass instead of many.
+</Annotation>

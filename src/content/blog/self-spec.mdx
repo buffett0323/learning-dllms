@@ -1,0 +1,26 @@
+---
+title: 'Drafting for yourself'
+hook: 'One model, two heads: diffusion drafts, AR checks.'
+description: 'Draft. Self-speculative decoding: a dLLM trained with an AR loss alongside drafts a block with its diffusion head and verifies it with its AR head. Sigma and NLD, and why the speedups need reading carefully.'
+pubDate: '2026-11-21'
+draft: true
+---
+
+import SpecDecode from '../../components/SpecDecode.astro';
+
+{/* Draft. Planned: NLD in more detail; how the acceptance fine-tune works. */}
+
+The drafters in S02–S04 are separate models next to the target. Here the target drafts for itself.
+
+<SpecDecode show={['ar', 'classic', 'self']} caption="One 13-token answer, three ways, in toy cost units (one step of the big model = 1). Self-speculative: the big model's own diffusion head drafts a block of 8 (1.25), its AR head verifies (1.25). Every lane outputs the big model's greedy text." />
+
+Nemotron-Labs-Sigma ([notes](../../papers/sigma/)) and NLD are dLLMs trained with an AR loss alongside (M12), so one backbone has both a diffusion head and a causal AR head. One round: the diffusion head drafts a block of 32 from pure noise in one call, and the AR head verifies it in one causal pass. One model, one KV cache.
+
+The output is the AR head's greedy text, so the quality is that of the model's **AR mode**, not its diffusion mode: for Sigma-8B, 67.48 instead of 71.16 on its base benchmarks.
+
+Two cautions on the reported numbers. Speedups are against the **same model's** AR decoding, and a round costs 3.0–3.5 AR steps, not 2, because both passes cover the whole block. And in absolute tokens per second, Sigma and NLD are within a few percent of each other, while NLD's AR head is more accurate (GSM8K 88.8 against 86.4 at 8B). Sigma's drafts are accepted more, but that buys no clear win.
+
+## References
+
+1. Yang et al. *Large Language Continuous Diffusion Models* (Nemotron-Labs-Sigma). 2026. [arXiv](https://arxiv.org/abs/2610.02665)
+2. Fu et al. Nemotron-Labs-Diffusion (NLD). 2026.

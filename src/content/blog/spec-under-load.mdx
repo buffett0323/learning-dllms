@@ -1,0 +1,22 @@
+---
+title: 'Speculation under load'
+hook: 'At batch 1 verification is free. At batch 32 it is not.'
+description: 'Draft. Why speculative decoding speedups shrink with concurrency, when to turn it off, and how vLLM and SGLang run drafters.'
+pubDate: '2026-11-21'
+draft: true
+---
+
+{/* Draft. Planned: DSpark's confidence-scheduled verification; WhiFlash routing between EAGLE-3 and DFlash; vLLM and SGLang support (SGLang Spec V2). */}
+
+At batch 1 a forward pass is memory-bound, so checking 16 extra positions costs almost nothing (P08). With many requests in flight it becomes compute-bound, and every rejected position takes compute another request could have used:
+
+- DFlash on SGLang, Qwen3-8B, MATH-500: 5.1× with 1 request, 2.8× with 32.
+- DFlash 2 on SGLang, Qwen3.8-27B, GSM8K: 3.43× with 1 request, 1.45× with 32. Qwen's MTP heads: 1.04× with 32.
+- EAGLE-3 with a 60-node draft tree on LLaMA-3.1-8B: 1.9× with 1 request, **0.6×** with 32, slower than no speculation.
+
+So how much to verify per request is a scheduling decision that depends on load. DFlash notes that a drafter trained with blocks of 16 also works with 8, so the block could shrink when the server is busy, and leaves it there.
+
+## References
+
+1. Chen, Liang, Liu. *DFlash: Block Diffusion for Flash Speculative Decoding*. ICML 2026. [arXiv](https://arxiv.org/abs/2602.06036)
+2. Inco AI. *DFlash 2: Keep Drafting Parallel*. 2026. [Post](https://inco.ai/blog/dflash2/)

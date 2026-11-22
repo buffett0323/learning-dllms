@@ -93,6 +93,36 @@ export const tracks: Track[] = [
 			},
 		],
 	},
+	{
+		id: 'drafting',
+		code: 'S',
+		title: 'Speculative Drafting',
+		blurb: 'Serving AR models faster with ideas from diffusion: a cheap drafter guesses many tokens, the target checks them all in one pass, and the output stays exactly the same.',
+		groups: [
+			{
+				title: 'Basics',
+				notes: [
+					{ slug: 'spec-basics', title: 'Speculative decoding', hook: 'Guess cheaply, check in one pass, keep only what the big model would have written.' },
+				],
+			},
+			{
+				title: 'Drafters',
+				notes: [
+					{ slug: 'ar-drafters', title: 'AR drafters: Medusa to EAGLE-3', hook: 'Draft from the target\'s own features, one token per pass.' },
+					{ slug: 'diffusion-drafters', title: 'Diffusion drafters: DFlash 1 and 2', hook: 'A whole block in one pass. Then make the block hold together.' },
+					{ slug: 'dspark', title: 'DSpark', hook: 'Between left to right and all at once, and verify only what is likely to pass.' },
+					{ slug: 'draft-trees', title: 'Draft trees', hook: 'Check several guesses at once, in one pass, with a tree mask.' },
+					{ slug: 'self-spec', title: 'Drafting for yourself', hook: 'One model, two heads: diffusion drafts, AR checks.' },
+				],
+			},
+			{
+				title: 'In production',
+				notes: [
+					{ slug: 'spec-under-load', title: 'Speculation under load', hook: 'At batch 1 verification is free. At batch 32 it is not.' },
+				],
+			},
+		],
+	},
 ];
 
 export interface SeriesNote {

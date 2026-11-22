@@ -77,6 +77,32 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | P10 | Engines built for dLLMs | dInfer, dLLM-Serve, Flash-dLLM: what they do that general engines do not, yet. | planned |
 | P11 | Attention masks in the kernel | Causal for some requests, bidirectional for others, in the same batch. | planned |
 
+### Speculative Drafting
+
+<!-- Serving AR models faster with ideas from diffusion. -->
+
+#### Basics
+
+| # | Note | Hook | Status |
+| --- | --- | --- | --- |
+| S01 | [Speculative decoding](https://buffett0323.github.io/learning-dllms/posts/spec-basics/) | Guess cheaply, check in one pass, keep only what the big model would have written. | live |
+
+#### Drafters
+
+| # | Note | Hook | Status |
+| --- | --- | --- | --- |
+| S02 | AR drafters: Medusa to EAGLE-3 | Draft from the target's own features, one token per pass. | planned |
+| S03 | [Diffusion drafters: DFlash 1 and 2](https://buffett0323.github.io/learning-dllms/posts/diffusion-drafters/) | A whole block in one pass. Then make the block hold together. | live |
+| S04 | DSpark | Between left to right and all at once, and verify only what is likely to pass. | planned |
+| S05 | Draft trees | Check several guesses at once, in one pass, with a tree mask. | planned |
+| S06 | Drafting for yourself | One model, two heads: diffusion drafts, AR checks. | planned |
+
+#### In production
+
+| # | Note | Hook | Status |
+| --- | --- | --- | --- |
+| S07 | Speculation under load | At batch 1 verification is free. At batch 32 it is not. | planned |
+
 ## Paper notes
 
 [The reading list](https://buffett0323.github.io/learning-dllms/papers/) shows each paper's original PDF with highlights and margin notes.
@@ -95,6 +121,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [MBD-LMs](https://buffett0323.github.io/learning-dllms/papers/mbd-lms/) | Multi-block decoding for block diffusion models: MultiTF post-training on small noisy block groups, static-shape Block Buffer | on the PDF |
 | [d3LLM](https://buffett0323.github.io/learning-dllms/papers/d3llm/) | Pseudo-trajectory distillation, D2F-style multi-block decoding with KV refresh, the AUP metric | text only (license) |
 | [Nemotron-Labs-Sigma](https://buffett0323.github.io/learning-dllms/papers/sigma/) | Continuous diffusion on 16-d embeddings at 3B/8B against a matched masked model; packed CFG, DMD distillation, self-speculative decoding | on the PDF |
+| [DFlash](https://buffett0323.github.io/learning-dllms/papers/dflash/) | A 5-layer block diffusion drafter for AR models: one-pass drafting, target features injected as KV | on the PDF |
 
 <!-- ## Writing
 

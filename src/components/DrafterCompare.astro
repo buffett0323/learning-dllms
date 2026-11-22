@@ -1,0 +1,556 @@
+---
+// One drafting round, four ways (S03). Context "Last week", and the AR target would write
+// "we flew from Boston to New York , and". Toy cost units: one forward pass of the target = 1.
+// - EAGLE-3: a 1-layer AR drafter, one guess per pass (0.15 each), 6 guesses, then the target verifies (1).
+// - DFlash 1: a 5-layer block-diffusion drafter fills 8 masks in one pass (0.4); each position takes its own top
+//   candidate, so positions 6 and 7 can disagree ("New Francisco"). Then the target verifies (1).
+// - DFlash 2: same pass, same candidates; a path selector scores adjacent pairs and picks "New York". Dynamic
+//   convolutions lift the confidence at the end of the block. The selector adds about 1% (not drawn).
+// - SDAR: a block-diffusion LM on its own, no verifier. Each step is a pass of the full model (1) and commits only
+//   the confident positions, so "York" waits for "New". Four steps for the block.
+// Verification keeps the longest matching prefix plus the target's own next token, as in SpecDecode.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+---
+
+<figure class="dc" data-dc>
+	<div class="dc-controls">
+		<button class="btn primary" type="button" data-act="play">Play</button>
+		<button class="btn icon" type="button" data-act="prev" aria-label="Back">‹</button>
+		<button class="btn icon" type="button" data-act="next" aria-label="Forward">›</button>
+		<span class="dc-clock" data-clock></span>
+	</div>
+	<div class="dc-ref">
+		<span class="k">context</span><span class="ctx">Last week</span>
+		<span class="k">target would write</span>
+		<span class="ref" data-ref></span>
+	</div>
+	<div class="dc-lanes" data-lanes></div>
+	<p class="dc-legend" aria-hidden="true">
+		<span><i class="sw mask"></i>mask</span>
+		<span><i class="sw dr"></i>draft, not yet checked</span>
+		<span><i class="sw acc"></i>accepted</span>
+		<span><i class="sw bad"></i>rejected</span>
+		<span><i class="sw bon"></i>target's own token</span>
+		<span><i class="sw own"></i>committed by the dLLM, unchecked</span>
+	</p>
+	<p class="dc-note" data-note aria-live="polite"></p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	const TARGET = ['we', 'flew', 'from', 'Boston', 'to', 'New', 'York', ',', 'and'];
+	type Slot = { tok: string; p: number; alt?: string };
+	type Lane = {
+		id: 'eagle' | 'df1' | 'df2' | 'sdar';
+		name: string;
+		how: string;
+		slots: Slot[];
+		pass: number; // cost of one drafter pass (or one SDAR step)
+		steps?: number[]; // SDAR: the step at which each position is committed
+	};
+	const lanes: Lane[] = [
+		{
+			id: 'eagle',
+			name: 'EAGLE-3',
+			how: 'AR drafter, 1 layer · one guess per pass, left to right · target checks',
+			pass: 0.15,
+			slots: [
+				{ tok: 'we', p: 0.95 },
+				{ tok: 'flew', p: 0.9 },
+				{ tok: 'from', p: 0.85 },
+				{ tok: 'Boston', p: 0.76 },
+				{ tok: 'on', p: 0.42 },
+				{ tok: 'a', p: 0.38 },
+			],
+		},
+		{
+			id: 'df1',
+			name: 'DFlash 1',
+			how: 'diffusion drafter, 5 layers · all 8 in one pass, each position picks alone · target checks',
+			pass: 0.4,
+			slots: [
+				{ tok: 'we', p: 0.97 },
+				{ tok: 'flew', p: 0.95 },
+				{ tok: 'from', p: 0.93 },
+				{ tok: 'Boston', p: 0.9 },
+				{ tok: 'to', p: 0.86 },
+				{ tok: 'New', p: 0.62, alt: 'San' },
+				{ tok: 'Francisco', p: 0.48, alt: 'York' },
+				{ tok: 'and', p: 0.3, alt: ',' },
+			],
+		},
+		{
+			id: 'df2',
+			name: 'DFlash 2',
+			how: 'same pass + path selector over neighbours + conv for the block end · target checks',
+			pass: 0.4,
+			slots: [
+				{ tok: 'we', p: 0.97 },
+				{ tok: 'flew', p: 0.96 },
+				{ tok: 'from', p: 0.95 },
+				{ tok: 'Boston', p: 0.93 },
+				{ tok: 'to', p: 0.9 },
+				{ tok: 'New', p: 0.66, alt: 'San' },
+				{ tok: 'York', p: 0.44, alt: 'Francisco' },
+				{ tok: '.', p: 0.45, alt: ',' },
+			],
+		},
+		{
+			id: 'sdar',
+			name: 'SDAR',
+			how: 'block-diffusion LM on its own · several steps, confident positions first · no check',
+			pass: 1,
+			slots: ['we', 'flew', 'from', 'Boston', 'to', 'New', 'York', ','].map((tok) => ({ tok, p: 1 })),
+			steps: [1, 1, 1, 2, 2, 3, 4, 4],
+		},
+	];
+	const CAND = 0.3; // DFlash: candidates become visible before the pass ends
+	const VERIFY = 1;
+
+	type View = {
+		cells: { tok: string; cls: string; alt?: string; p?: number; step?: number; pair?: boolean }[];
+		bonus: string;
+		act: string;
+		done: boolean;
+		end: number;
+		result: string;
+	};
+	function draftEnd(l: Lane) {
+		return l.id === 'eagle' ? l.slots.length * l.pass : l.pass;
+	}
+	function endOf(l: Lane) {
+		return l.id === 'sdar' ? Math.max(...l.steps!) * l.pass : draftEnd(l) + VERIFY;
+	}
+	function verify(l: Lane) {
+		let ok = true;
+		let n = 0;
+		const st = l.slots.map((s, i) => {
+			if (ok && s.tok === TARGET[i]) {
+				n++;
+				return 'acc';
+			}
+			if (ok) {
+				ok = false;
+				return 'bad';
+			}
+			return 'gone';
+		});
+		return { st, n, bonus: TARGET[n] };
+	}
+	const E = 1e-9;
+	function view(l: Lane, c: number): View {
+		const end = endOf(l);
+		const v: View = { cells: [], bonus: '', act: '', done: c >= end - E, end, result: '' };
+		if (l.id === 'sdar') {
+			const step = Math.min(Math.floor(c / l.pass + E) + 1, 5); // step running now
+			v.cells = l.slots.map((s, i) => (l.steps![i] < step ? { tok: s.tok, cls: 'own', step: l.steps![i] } : { tok: '', cls: 'mask' }));
+			v.act = v.done ? '' : `step ${step} of 4: one pass of the full model`;
+			if (v.done) v.result = `8 tokens in ${end.toFixed(2)} → ${(8 / end).toFixed(1)} per unit · 4 passes of the full model · nothing checks them`;
+			return v;
+		}
+		const dEnd = draftEnd(l);
+		const isEagle = l.id === 'eagle';
+		const shown = isEagle ? Math.min(l.slots.length, Math.floor(c / l.pass + E)) : c >= dEnd - E ? l.slots.length : 0;
+		const candPhase = !isEagle && c >= CAND - E && c < dEnd - E;
+		const checked = c >= dEnd + VERIFY - E;
+		const res = verify(l);
+		v.cells = Array.from({ length: 8 }, (_, i) => {
+			const s = l.slots[i];
+			if (!s) return { tok: '', cls: 'none' };
+			if (candPhase) return { tok: `${s.tok}`, cls: 'cand', alt: s.alt, p: s.p };
+			if (i < shown) return { tok: s.tok, cls: checked ? res.st[i] : 'dr', alt: s.alt, p: s.p, pair: l.id === 'df2' && (i === 5 || i === 6) };
+			if (isEagle && i === shown && c < dEnd) return { tok: '', cls: 'mask run' };
+			return { tok: '', cls: isEagle ? 'none' : 'mask' };
+		});
+		if (checked) v.bonus = res.bonus;
+		v.act = checked
+			? ''
+			: c >= dEnd - E
+				? 'target: checks the drafts in one pass'
+				: isEagle
+					? `drafter pass ${shown + 1} of ${l.slots.length}: one more guess`
+					: candPhase
+						? l.id === 'df1'
+							? 'top candidates ready: each position takes its own top one'
+							: 'top candidates ready: the selector scores neighbouring pairs'
+						: 'one drafter pass fills all 8 masks';
+		if (v.done) {
+			const n = res.n + 1;
+			v.result = `${n} tokens in ${end.toFixed(2)} → ${(n / end).toFixed(1)} per unit · ${isEagle ? `${l.slots.length} drafter passes` : '1 drafter pass'} + 1 target pass · same text as the target`;
+		}
+		return v;
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-dc]').forEach((fig) => {
+		const lanesEl = fig.querySelector<HTMLElement>('[data-lanes]')!;
+		const clockEl = fig.querySelector<HTMLElement>('[data-clock]')!;
+		const note = fig.querySelector<HTMLElement>('[data-note]')!;
+		const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+		fig.querySelector<HTMLElement>('[data-ref]')!.innerHTML = TARGET.map((t) => `<span>${t}</span>`).join('');
+		const MAX = Math.max(...lanes.map(endOf));
+		const STEP = 0.05;
+		let clock = 0;
+		let timer: number | undefined;
+
+		function bar(l: Lane) {
+			const segs: string[] = [];
+			const w = (d: number) => `${(d / MAX) * 100}%`;
+			if (l.id === 'sdar') for (let i = 0; i < 4; i++) segs.push(`<i class="seg big" style="width:${w(1)}"></i>`);
+			else {
+				if (l.id === 'eagle') l.slots.forEach(() => segs.push(`<i class="seg small" style="width:${w(l.pass)}"></i>`));
+				else segs.push(`<i class="seg small" style="width:${w(l.pass)}"></i>`);
+				segs.push(`<i class="seg big" style="width:${w(VERIFY)}"></i>`);
+			}
+			return `<div class="bar">${segs.join('')}<i class="cur" style="left:${(Math.min(clock, endOf(l)) / MAX) * 100}%"></i></div>`;
+		}
+		function laneHTML(l: Lane) {
+			const v = view(l, clock);
+			const cells = v.cells
+				.map((x) => {
+					if (x.cls === 'none') return '<span class="cell none"></span>';
+					if (x.cls.startsWith('mask')) return `<span class="cell ${x.cls}"></span>`;
+					const sub =
+						x.cls === 'cand'
+							? `<small class="alt2">${x.alt ?? ''}</small>`
+							: x.step
+								? `<small class="sub">step ${x.step}</small>`
+								: x.alt
+									? `<small class="sub">alt ${x.alt}</small>`
+									: '<small class="sub">&nbsp;</small>';
+					const p = x.p !== undefined && l.id !== 'sdar' ? `<i class="conf" style="width:${x.p * 100}%"></i>` : '';
+					return `<span class="cell ${x.cls}${x.pair ? ' pair' : ''}"><b>${x.tok}</b>${sub}${p}</span>`;
+				})
+				.join('');
+			const bonus = l.id === 'sdar' ? '<span class="cell none"></span>' : v.bonus ? `<span class="cell bon"><b>${v.bonus}</b><small class="sub">target</small></span>` : '<span class="cell slot">+1</span>';
+			return `<div class="lane ${v.done ? 'fin' : ''}">
+				<div class="lh"><b>${l.name}</b><small>${l.how}</small></div>
+				<div class="row">${cells}${bonus}</div>
+				${bar(l)}
+				<div class="ls">${v.done ? `<span class="res">${v.result}</span>` : `<span class="act">${v.act}</span>`}</div>
+			</div>`;
+		}
+		function noteText() {
+			if (clock === 0) return 'One round of drafting for the same context. Press Play, or step with › .';
+			if (clock < CAND - E) return 'EAGLE-3 pays one pass per guess, so its drafter stays at one layer. Both DFlash lanes run one pass for all 8 masks. SDAR runs its first denoising step.';
+			if (clock < 0.4 - E)
+				return 'DFlash has the top candidates at every position. Alone, position 7 slightly prefers "Francisco" over "York": both follow "New" or "San" somewhere. DFlash 1 takes each top pick, "New Francisco". DFlash 2 scores neighbouring pairs, and "New York" wins.';
+			if (clock < 1.4 - E) return 'The target reads all the drafts in one pass. EAGLE-3 is still guessing one token at a time.';
+			if (clock < 1.9 - E)
+				return 'DFlash 1: 6 accepted, then "Francisco" fails and the target writes "York": 7 tokens. DFlash 2: 7 accepted plus the target\'s ",": 8 tokens, one more for the same pass. Its last guess still fails: the end of a block stays the hardest part.';
+			if (clock < MAX - E)
+				return 'EAGLE-3: never incoherent, since each guess sees the one before, but a 1-layer drafter loses the thread sooner. SDAR still decodes: "York" waits a step until "New" is fixed, so it stays coherent, but every step is a pass of the full model.';
+			return 'Per unit of target time: DFlash 2 > DFlash 1 > EAGLE-3 > SDAR. The three drafters output exactly the target\'s text. SDAR writes on its own: its text is only as good as the dLLM.';
+		}
+		function render() {
+			clockEl.textContent = `time ${clock.toFixed(2)} (1 = one target pass)`;
+			lanesEl.innerHTML = lanes.map(laneHTML).join('');
+			note.textContent = noteText();
+			playBtn.textContent = timer ? 'Pause' : clock >= MAX - E ? 'Replay' : 'Play';
+		}
+		function stop() {
+			if (timer) clearInterval(timer);
+			timer = undefined;
+		}
+		const go = (d: number) => {
+			stop();
+			clock = Math.min(MAX, Math.max(0, +(clock + d).toFixed(2)));
+			render();
+		};
+		playBtn.addEventListener('click', () => {
+			if (timer) {
+				stop();
+				return render();
+			}
+			if (clock >= MAX - E) clock = 0;
+			timer = window.setInterval(() => {
+				clock = Math.min(MAX, +(clock + STEP).toFixed(2));
+				if (clock >= MAX - E) stop();
+				render();
+			}, 140);
+			render();
+		});
+		fig.querySelector('[data-act="prev"]')!.addEventListener('click', () => go(-STEP * 2));
+		fig.querySelector('[data-act="next"]')!.addEventListener('click', () => go(STEP * 2));
+		fig.classList.add('ready');
+		render();
+	});
+</script>
+
+<style>
+	.dc {
+		--c-ok: #2f6fb3;
+		--c-dr: #b7791f;
+		--c-bad: #c2410c;
+		--c-bon: #2f7d4f;
+		--c-own: #7c4dbd;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .dc {
+		--c-ok: #4f8fd6;
+		--c-dr: #e0b04f;
+		--c-bad: #e06a2c;
+		--c-bon: #4fb07a;
+		--c-own: #a98be0;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .dc {
+			--c-ok: #4f8fd6;
+			--c-dr: #e0b04f;
+			--c-bad: #e06a2c;
+			--c-bon: #4fb07a;
+			--c-own: #a98be0;
+		}
+	}
+	.dc:not(.ready) {
+		display: none;
+	}
+	.dc-controls {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem 0.6rem;
+		padding-bottom: 0.9rem;
+		border-bottom: 1px dashed var(--line);
+	}
+	.dc-clock {
+		font: 0.74rem var(--mono);
+		color: var(--muted);
+	}
+	.dc-ref {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.3rem 0.6rem;
+		margin-top: 0.8rem;
+		font: 0.72rem var(--mono);
+	}
+	.dc-ref .k {
+		color: var(--muted);
+		font-size: 0.66rem;
+	}
+	.dc-ref .ctx {
+		font-weight: 600;
+	}
+	.dc-ref .ref {
+		display: inline-flex;
+		flex-wrap: wrap;
+		gap: 3px;
+	}
+	.dc-ref .ref :global(span) {
+		padding: 0.1rem 0.35rem;
+		border: 1px solid var(--line);
+		border-radius: 4px;
+		color: var(--muted);
+	}
+	.dc-lanes {
+		display: grid;
+		gap: 0.8rem;
+		margin-top: 0.9rem;
+	}
+	.dc-lanes :global(.lane) {
+		display: grid;
+		gap: 0.35rem;
+		padding-bottom: 0.8rem;
+		border-bottom: 1px solid var(--line);
+	}
+	.dc-lanes :global(.lh) {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0 0.6rem;
+		align-items: baseline;
+	}
+	.dc-lanes :global(.lh b) {
+		font: 600 0.82rem var(--mono);
+	}
+	.dc-lanes :global(.lh small) {
+		font-size: 0.72rem;
+		color: var(--muted);
+	}
+	.dc-lanes :global(.lane.fin .lh b)::after {
+		content: ' ✓';
+		color: var(--c-bon);
+	}
+	.dc-lanes :global(.row) {
+		display: grid;
+		grid-template-columns: repeat(9, minmax(0, 1fr));
+		gap: 3px;
+	}
+	.dc-lanes :global(.cell) {
+		position: relative;
+		display: grid;
+		align-content: center;
+		justify-items: center;
+		min-height: 2.3rem;
+		padding: 0 2px 3px;
+		border-radius: 4px;
+		font: 0.72rem var(--mono);
+		white-space: nowrap;
+		overflow: hidden;
+	}
+	.dc-lanes :global(.cell b) {
+		font-weight: 500;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.dc-lanes :global(.cell small) {
+		font-size: 0.58rem;
+		color: var(--faint);
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.dc-lanes :global(.cell .conf) {
+		position: absolute;
+		left: 0;
+		bottom: 0;
+		height: 3px;
+		background: var(--c-dr);
+		opacity: 0.7;
+	}
+	.dc-lanes :global(.cell.none) {
+		visibility: hidden;
+	}
+	.dc-lanes :global(.cell.slot) {
+		border: 1px dashed var(--line);
+		color: var(--faint);
+		font-size: 0.62rem;
+	}
+	.dc-lanes :global(.cell.mask),
+	.sw.mask {
+		background: repeating-linear-gradient(45deg, var(--code-bg) 0 3px, color-mix(in srgb, var(--c-dr) 22%, var(--surface)) 3px 6px);
+		border: 1px solid var(--line);
+	}
+	.dc-lanes :global(.cell.mask.run) {
+		border: 1.5px solid var(--c-dr);
+	}
+	.dc-lanes :global(.cell.cand) {
+		border: 1px dashed var(--c-dr);
+	}
+	.dc-lanes :global(.cell.cand .alt2) {
+		color: var(--muted);
+	}
+	.dc-lanes :global(.cell.dr),
+	.sw.dr {
+		background: color-mix(in srgb, var(--c-dr) 16%, var(--surface));
+		border: 1.5px dashed var(--c-dr);
+	}
+	.dc-lanes :global(.cell.pair) {
+		box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--c-bon) 55%, transparent);
+	}
+	.dc-lanes :global(.cell.acc),
+	.sw.acc {
+		background: color-mix(in srgb, var(--c-ok) 16%, var(--surface));
+		border: 1.5px solid var(--c-ok);
+	}
+	.dc-lanes :global(.cell.bad),
+	.sw.bad {
+		border: 1.5px solid var(--c-bad);
+		color: var(--c-bad);
+	}
+	.dc-lanes :global(.cell.bad b) {
+		text-decoration: line-through;
+	}
+	.dc-lanes :global(.cell.gone) {
+		border: 1px dotted var(--line);
+		color: var(--faint);
+	}
+	.dc-lanes :global(.cell.gone b) {
+		text-decoration: line-through;
+	}
+	.dc-lanes :global(.cell.bon),
+	.sw.bon {
+		background: color-mix(in srgb, var(--c-bon) 22%, var(--surface));
+		border: 1.5px solid var(--c-bon);
+	}
+	.dc-lanes :global(.cell.own),
+	.sw.own {
+		background: color-mix(in srgb, var(--c-own) 16%, var(--surface));
+		border: 1.5px solid var(--c-own);
+	}
+	.dc-lanes :global(.bar) {
+		position: relative;
+		display: flex;
+		gap: 2px;
+		height: 0.6rem;
+	}
+	.dc-lanes :global(.seg) {
+		flex: 0 0 auto;
+		height: 100%;
+		border-radius: 2px;
+	}
+	.dc-lanes :global(.seg.small) {
+		background: color-mix(in srgb, var(--c-dr) 55%, var(--surface));
+	}
+	.dc-lanes :global(.seg.big) {
+		background: color-mix(in srgb, var(--c-ok) 45%, var(--surface));
+	}
+	.dc-lanes :global(.cur) {
+		position: absolute;
+		top: -3px;
+		bottom: -3px;
+		width: 2px;
+		background: var(--fg);
+	}
+	.dc-lanes :global(.ls) {
+		font: 0.68rem var(--mono);
+		color: var(--muted);
+		min-height: 1.1em;
+	}
+	.dc-lanes :global(.act) {
+		color: var(--c-dr);
+		font-weight: 600;
+	}
+	.dc-lanes :global(.res) {
+		color: var(--fg);
+	}
+	.dc-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1rem;
+		margin: 0.6rem 0 0;
+		font: 0.7rem var(--mono);
+		color: var(--muted);
+	}
+	.dc-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.85rem;
+		height: 0.85rem;
+		border-radius: 3px;
+	}
+	.dc-note {
+		margin: 0.6rem 0 0;
+		min-height: 4.5em;
+		font-size: 0.92rem;
+		line-height: 1.5;
+		color: var(--muted);
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.dc {
+			padding: 1rem;
+		}
+		.dc-lanes :global(.cell) {
+			font-size: 0.55rem;
+		}
+		.dc-lanes :global(.cell small) {
+			font-size: 0.5rem;
+		}
+	}
+</style>

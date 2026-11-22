@@ -7,13 +7,16 @@
 // each costs a bit more than an AR step (1.25 here; the paper measures a round at 3.0-3.5 AR steps for blocks
 // of 32). Verification keeps the longest prefix matching the verifier's greedy tokens, plus one token of its
 // own, so every lane outputs the same text.
+// DFlash (S03): a separate small block-diffusion drafter, fed with the target's hidden features, guesses a block
+// of 8 in one pass (0.5), and the big model verifies it (1). `show` picks the lanes: ar, classic, self, dflash.
 interface Props {
 	caption?: string;
+	show?: string[];
 }
-const { caption } = Astro.props;
+const { caption, show = ['ar', 'classic', 'self'] } = Astro.props;
 ---
 
-<figure class="sd" data-sd>
+<figure class="sd" data-sd data-show={JSON.stringify(show)}>
 	<div class="sd-controls">
 		<button class="btn primary" type="button" data-act="play">Play</button>
 		<button class="btn icon" type="button" data-act="prev" aria-label="Back">‹</button>
@@ -37,7 +40,7 @@ const { caption } = Astro.props;
 	type Ev =
 		| { kind: 'ar'; dur: number }
 		| { kind: 'draft1'; dur: number; tok: string } // one token from the small drafter
-		| { kind: 'draftAll'; dur: number; toks: string[] } // a whole block from the diffusion head
+		| { kind: 'draftAll'; dur: number; toks: string[]; small?: boolean } // a whole block in one pass
 		| { kind: 'verify'; dur: number };
 	type Lane = { id: string; name: string; who: string; caches: string; events: Ev[] };
 
@@ -50,6 +53,10 @@ const { caption } = Astro.props;
 	const selfDrafts = [
 		['The', 'answer', 'is', '5', ',', 'so', 'the', 'add'], // 7th wrong: verifier writes "we"
 		['add', '3', 'to', 'get', '8', '.', 'eos', 'eos'],
+	];
+	const dflashDrafts = [
+		['The', 'answer', 'is', '5', ',', 'so', 'we', 'and'], // 8th wrong: the verifier writes "add"
+		['3', 'to', 'get', '8', '.', 'eos', 'eos', 'eos'],
 	];
 	const lanes: Lane[] = [
 		{ id: 'ar', name: 'AR decoding', who: 'big model, one token per step', caches: '1 KV cache', events: ANSWER.map(() => ({ kind: 'ar', dur: 1 })) },
@@ -67,6 +74,13 @@ const { caption } = Astro.props;
 			caches: '1 KV cache, shared by both heads',
 			events: [],
 		},
+		{
+			id: 'dflash',
+			name: 'Diffusion drafter (DFlash)',
+			who: 'separate small block-diffusion drafter, reads the big model\'s features, a block in one pass',
+			caches: '2 KV caches (big model + drafter, with injected features)',
+			events: [],
+		},
 	];
 	// Build the round structure; rounds stop once the answer is complete (simulated below).
 	for (const d of classicDrafts) {
@@ -76,6 +90,10 @@ const { caption } = Astro.props;
 	for (const d of selfDrafts) {
 		lanes[2].events.push({ kind: 'draftAll', dur: 1.25, toks: d });
 		lanes[2].events.push({ kind: 'verify', dur: 1.25 });
+	}
+	for (const d of dflashDrafts) {
+		lanes[3].events.push({ kind: 'draftAll', dur: 0.5, toks: d, small: true });
+		lanes[3].events.push({ kind: 'verify', dur: 1 });
 	}
 
 	type Slot = { tok: string; st: 'dr' | 'acc' | 'bad' | 'gone' };
@@ -104,7 +122,8 @@ const { caption } = Astro.props;
 					s.smallF++;
 					s.draft.push({ tok: ev.tok, st: 'dr' });
 				} else {
-					s.bigF++;
+					if (ev.small) s.smallF++;
+					else s.bigF++;
 					s.draft = ev.toks.map((tok) => ({ tok, st: 'dr' as const }));
 				}
 				s.bonus = -1;
@@ -142,11 +161,14 @@ const { caption } = Astro.props;
 	}
 
 	document.querySelectorAll<HTMLElement>('[data-sd]').forEach((fig) => {
+		const showIds = JSON.parse(fig.dataset.show!) as string[];
+		const shown = lanes.filter((l) => showIds.includes(l.id));
+		const byId = (id: string) => lanes.find((l) => l.id === id)!;
 		const lanesEl = fig.querySelector<HTMLElement>('[data-lanes]')!;
 		const clockEl = fig.querySelector<HTMLElement>('[data-clock]')!;
 		const note = fig.querySelector<HTMLElement>('[data-note]')!;
 		const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
-		const ends = lanes.map(finishTime);
+		const ends = shown.map(finishTime);
 		const MAX = Math.max(...ends);
 		let clock = 0;
 		let timer: number | undefined;
@@ -167,7 +189,9 @@ const { caption } = Astro.props;
 					: s.running === 'draft1'
 						? 'small drafter: next guess'
 						: s.running === 'draftAll'
-							? 'diffusion head: whole block from noise, one call'
+							? lane.id === 'dflash'
+									? 'small diffusion drafter: whole block, one pass'
+									: 'diffusion head: whole block from noise, one call'
 							: s.running === 'verify'
 								? lane.id === 'self'
 									? 'AR head: check the block, one causal pass'
@@ -180,26 +204,30 @@ const { caption } = Astro.props;
 				<div class="ls">
 					<span class="act ${s.running ? 'on' : ''}">${act || '&nbsp;'}</span>
 					<span>big-model passes <b>${s.bigF}</b></span>
-					${lane.id === 'classic' ? `<span>drafter passes <b>${s.smallF}</b></span>` : ''}
+					${lane.id === 'classic' || lane.id === 'dflash' ? `<span>drafter passes <b>${s.smallF}</b></span>` : ''}
 					<span>${lane.caches}</span>
 				</div>
 			</div>`;
 		}
 		function render() {
 			clockEl.textContent = `time ${clock.toFixed(2)} (1 = one AR step)`;
-			lanesEl.innerHTML = lanes.map(laneHTML).join('');
-			const sSelf = stateAt(lanes[2], clock);
-			const sCl = stateAt(lanes[1], clock);
+			lanesEl.innerHTML = shown.map(laneHTML).join('');
+			const has = (id: string) => showIds.includes(id);
+			const sSelf = stateAt(byId('self'), clock);
+			const sCl = stateAt(byId('classic'), clock);
+			const sDf = stateAt(byId('dflash'), clock);
 			note.textContent =
 				clock === 0
-					? 'All three produce the same 13 tokens: verification keeps only what the verifier would have chosen itself. Press Play.'
+					? 'Every lane produces the same 13 tokens: verification keeps only what the verifier would have chosen itself. Press Play.'
 					: clock >= MAX
-						? `Finished at ${ends.map((e) => e.toFixed(2)).join(', ')}. The classic drafter guesses a few tokens one after another; the diffusion head guesses a whole block at once, but each of its passes covers the whole block and costs more.`
-						: sSelf.running === 'draftAll'
+						? `Finished at ${ends.map((e) => e.toFixed(2)).join(', ')}. The classic drafter pays one pass per guess. ${has('dflash') ? 'The small diffusion drafter pays one pass per block, whatever its length.' : 'The diffusion head guesses a whole block at once, but each of its passes covers the whole block and costs more.'}`
+						: has('dflash') && sDf.running === 'draftAll'
+							? 'DFlash draft: a small diffusion model fills the whole masked block in one pass, using the big model\'s hidden features. Its cost does not grow with the block.'
+							: has('self') && sSelf.running === 'draftAll'
 							? 'Self-spec draft: every position of the block starts as noise and is read out after a single denoiser call. No left-to-right order.'
-							: sCl.running === 'draft1'
+							: has('classic') && sCl.running === 'draft1'
 								? 'Classic draft: the small model writes one token per pass, left to right, like any AR model.'
-								: sSelf.draft.some((d) => d.st === 'bad') && sSelf.running !== 'verify'
+								: has('self') && sSelf.draft.some((d) => d.st === 'bad') && sSelf.running !== 'verify'
 									? 'Self-spec: drafts after the first mismatch are thrown away, even if some were right; the verifier writes its own token in place of the first wrong one.'
 									: '';
 			playBtn.textContent = timer ? 'Pause' : clock >= MAX ? 'Replay' : 'Play';

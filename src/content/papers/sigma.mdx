@@ -131,7 +131,7 @@ Diversity is kept: pass@$k$ of the 8-NFE student catches up with the 256-NFE tea
 1. **Draft**: one diffusion call from pure noise proposes a whole block of 32 tokens.
 2. **Verify**: the AR stream scores the block in one causal pass, keeps the longest prefix that matches its own greedy choice, and adds one token of its own.
 
-Two forward passes commit the accepted length plus one. On one GB200 in SGLang, at batch 1, the distilled 8B models accept 7–12 tokens per round and run 2.4–4.2× faster than their own AR decoding (Fig. 9). Against NLD drafting the same way, they accept 14–23% more tokens per round without any drafter training, and 21–33% more with a short acceptance fine-tune (Table 3). P06 compares this with other ways of drafting and correcting.
+Two forward passes commit the accepted length plus one. On one GB200 in SGLang, at batch 1, the distilled 8B models accept 7–12 tokens per round and run 2.4–4.2× faster than their own AR decoding (Fig. 9). Against NLD drafting the same way, they accept 14–23% more tokens per round without any drafter training, and 21–33% more with a short acceptance fine-tune (Table 3). S06 compares this with other drafters.
 </Annotation>
 
 <Annotation page={11} line={36} text="the accuracy remains that of the AR mode in each model" color="yellow">

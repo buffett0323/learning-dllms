@@ -1,0 +1,44 @@
+---
+title: 'Speculative decoding'
+hook: 'Guess cheaply, check in one pass, keep only what the big model would have written.'
+description: 'How speculative decoding makes an AR model faster without changing its output: draft, verify, keep the matching prefix plus one token. The cost formula that every drafter in the S track trades on, and the kinds of drafter, AR, diffusion, and self-drafting.'
+pubDate: '2026-11-21'
+---
+
+import SpecDecode from '../../components/SpecDecode.astro';
+
+The M and P tracks build and serve dLLMs. This track goes the other way: it uses ideas from diffusion to serve an **AR** model faster. A dLLM on its own writes worse than an AR model of the same size (M06, M12). But it can guess a whole block in one pass, and in speculative decoding a guess only has to be right often, because every guess is checked.
+
+## Draft, verify, keep
+
+A cheap **drafter** proposes $\gamma$ tokens. The **target**, the AR model we want to serve, reads them all in one forward pass, which gives its own choice at every position. It keeps the longest prefix where the draft matches its choices, then adds one token of its own at the first mismatch. The output is exactly what the target would have written alone; only the speed changes.
+
+<SpecDecode show={['ar', 'classic']} caption="A 13-token answer, in toy cost units (one step of the target = 1). Below, a small AR drafter guesses 4 tokens, one pass each (0.25), and the target checks them in one pass (1). A wrong guess costs only the guesses after it; the target's own token replaces it." />
+
+Why checking is cheap: at batch 1 a forward pass is limited by reading the weights, not by arithmetic (P08). Reading 5 positions costs about the same as reading 1.
+
+**With sampling**, matching is replaced by a coin flip. A draft token $x$ with drafter probability $q(x)$ and target probability $p(x)$ is kept with probability $\min(1, p(x)/q(x))$. On a rejection, the target samples from what is left, $\max(0, p - q)$, renormalized. The output then has exactly the target's distribution.
+
+## What a drafter has to do
+
+With $\tau$ the tokens committed per round, accepted drafts plus the target's own one, the time per token is
+
+$$
+L = \frac{T_{\text{draft}} + T_{\text{verify}}}{\tau}.
+$$
+
+So a drafter helps by being **cheap** (small $T_{\text{draft}}$) or **accurate** (large $\tau$). The two pull against each other. An AR drafter pays one pass per guess, so it must stay small, and a small drafter is accepted less. Diffusion offers a way out: a block of guesses for one pass.
+
+| | Who drafts | How | Draft cost | Note |
+|---|---|---|---|---|
+| **AR drafter** (Medusa, EAGLE-3, MTP) | small heads or layers on the target's features | one token per pass, left to right | grows with $\gamma$ | S02 |
+| **Diffusion drafter** (DFlash 1 and 2) | a separate small block-diffusion model | a whole block in one pass | about one pass, whatever $\gamma$ | S03 |
+| **Semi-AR drafter** (DSpark) | in between | a few tokens per pass | | S04 |
+| **Self-speculative** (Sigma, NLD) | the same model's diffusion head | a whole block in one pass | one pass of the **big** model | S06 |
+
+S05 checks a tree of guesses instead of a single chain. S07 looks at what happens with many requests at once, where verification stops being free.
+
+## References
+
+1. Leviathan, Kalman, Matias. *Fast Inference from Transformers via Speculative Decoding*. ICML 2023.
+2. Chen et al. *Accelerating Large Language Model Decoding with Speculative Sampling*. 2023.
