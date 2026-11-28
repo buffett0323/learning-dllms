@@ -1,0 +1,434 @@
+---
+// One DFlash round, step by step (S03). Figure 2's example with a block of 8:
+// prompt "Diffusion is good", the target wrote "for" (the anchor).
+// 1. The block is [for, MASK x 7].
+// 2. One drafter pass fills all 7 masks at once, each position on its own (q = its probability).
+// 3. One target pass reads all 8 tokens; its output at slot j-1 is its pick for slot j.
+// 4. Compare left to right (greedy for clarity): slots 1-4 match, slot 5 does not, stop. Slots 6-7 match
+//    too, but come after a rejection, so they are thrown away.
+// 5. Output: 4 drafts + the target's own token at slot 5. Two passes, 5 tokens.
+// 6. The target's token is the next anchor.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+---
+
+<figure class="dr" data-dr>
+	<div class="dr-controls">
+		<button class="btn primary" type="button" data-act="play">Play</button>
+		<button class="btn icon" type="button" data-act="prev" aria-label="Back">‹</button>
+		<button class="btn icon" type="button" data-act="next" aria-label="Forward">›</button>
+		<span class="dr-step" data-stepno></span>
+	</div>
+
+	<p class="dr-ctx"><span class="k">context</span><span data-ctx></span></p>
+
+	<div class="dr-rows">
+		<p class="dr-label" data-lab-block>block, into the drafter</p>
+		<div class="dr-row" data-block></div>
+		<p class="dr-label" data-lab-target>target, one pass over the block: its own pick for each slot</p>
+		<div class="dr-row" data-target></div>
+		<p class="dr-label">output this round</p>
+		<div class="dr-out" data-out></div>
+	</div>
+
+	<p class="dr-note" data-note aria-live="polite"></p>
+
+	<p class="dr-legend" aria-hidden="true">
+		<span><i class="sw anc"></i>anchor</span>
+		<span><i class="sw mask"></i>mask</span>
+		<span><i class="sw draft"></i>draft</span>
+		<span><i class="sw acc"></i>accepted</span>
+		<span><i class="sw bad"></i>rejected</span>
+		<span><i class="sw gone"></i>thrown away</span>
+		<span><i class="sw bon"></i>target's own token</span>
+	</p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+	const PROMPT = 'Diffusion is good';
+	const DRAFT = [
+		{ tok: 'speculative', q: 0.92 },
+		{ tok: 'decoding', q: 0.88 },
+		{ tok: 'because', q: 0.71 },
+		{ tok: 'it', q: 0.64 },
+		{ tok: 'is', q: 0.41 },
+		{ tok: 'very', q: 0.3 },
+		{ tok: 'fast', q: 0.27 },
+	];
+	const PICK = ['speculative', 'decoding', 'because', 'it', 'drafts', 'very', 'fast'];
+	const FIRST_BAD = PICK.findIndex((t, i) => t !== DRAFT[i].tok); // 4
+	const N = DRAFT.length;
+
+	const NOTES = [
+		'The target has read "Diffusion is good" and written "for". That token is the anchor: the one slot the drafter knows. The other 7 slots are masks.',
+		'Drafter, one forward pass. All 7 masks are filled at once; each slot picks its own most likely token without seeing what its neighbours pick. The bar is the drafter\'s probability q.',
+		'Target, one forward pass over all 8 tokens, like reading a prompt. At each slot it reads everything to its left (anchor and drafts) and gives its own pick for the next slot.',
+		`Compare left to right. Slots 1–4 match. Slot 5: the drafter wrote "is", the target wants "drafts". Stop here. Slots 6–7 also match, but the target computed them after "is", which is now wrong, so they are thrown away.`,
+		'Keep the 4 matching drafts and add the target\'s own pick at the first mismatch. 5 tokens for one drafter pass and one target pass. The target\'s cache keeps the anchor and the 4 drafts; the rest is cropped.',
+		'"drafts" is the new anchor: the target has chosen it but not read it yet. A fresh block of masks follows, and the drafter now also reads the target\'s features for the 5 new positions.',
+	];
+	const LAST = NOTES.length - 1;
+
+	document.querySelectorAll<HTMLElement>('[data-dr]').forEach((fig) => {
+		const $ = (s: string) => fig.querySelector<HTMLElement>(s)!;
+		const ctx = $('[data-ctx]');
+		const block = $('[data-block]');
+		const target = $('[data-target]');
+		const out = $('[data-out]');
+		const note = $('[data-note]');
+		const stepno = $('[data-stepno]');
+		const labTarget = $('[data-lab-target]');
+		const playBtn = $('[data-act="play"]') as HTMLButtonElement;
+		let step = 0;
+		let timer = 0;
+
+		const cell = (cls: string, html: string, delay = 0) =>
+			`<span class="cell ${cls}" style="--d:${delay}ms">${html}</span>`;
+
+		function render() {
+			const accepted = DRAFT.slice(0, FIRST_BAD).map((d) => d.tok);
+			const done = step >= LAST;
+			ctx.innerHTML = done
+				? `${PROMPT} <b>for ${accepted.join(' ')}</b>`
+				: `${PROMPT}`;
+
+			// Block row.
+			const anchor = done ? PICK[FIRST_BAD] : 'for';
+			const slots: string[] = [cell('anc', anchor)];
+			for (let i = 0; i < N; i++) {
+				const d = DRAFT[i];
+				if (step === 0 || done) {
+					slots.push(cell('mask', '▢'));
+					continue;
+				}
+				let cls = 'draft';
+				if (step >= 3) cls = i < FIRST_BAD ? 'acc' : i === FIRST_BAD ? 'bad' : 'gone';
+				const bar = `<i class="bar" style="width:${d.q * 100}%"></i>`;
+				slots.push(cell(`${cls} ${step === 1 ? 'pop' : ''}`, `<span class="t">${d.tok}</span>${bar}`, step === 1 ? 60 * i : 0));
+			}
+			block.innerHTML = slots.join('');
+
+			// Target row: its pick for slot j comes from reading slots 0..j-1.
+			const show = step >= 2 && !done;
+			labTarget.style.visibility = show ? 'visible' : 'hidden';
+			const trow: string[] = [cell('blank', '')];
+			for (let i = 0; i < N; i++) {
+				if (!show) {
+					trow.push(cell('blank', ''));
+					continue;
+				}
+				let cls = 'pick';
+				let mark = '';
+				if (step >= 3) {
+					if (i < FIRST_BAD) {
+						cls += ' ok';
+						mark = '✓';
+					} else if (i === FIRST_BAD) {
+						cls += ' bon';
+						mark = '';
+					} else cls += ' gone';
+				}
+				trow.push(
+					cell(`${cls} ${step === 2 ? 'pop' : ''}`, `<span class="t">${PICK[i]}</span>${mark ? `<b class="m">${mark}</b>` : ''}`, step === 2 ? 40 * i : step === 3 ? 0 : 0),
+				);
+			}
+			target.innerHTML = trow.join('');
+
+			// Output.
+			if (step >= 4) {
+				out.innerHTML =
+					accepted.map((t) => cell('acc', t)).join('') +
+					cell('bon', PICK[FIRST_BAD]) +
+					`<span class="sum">${FIRST_BAD + 1} tokens · 1 drafter pass + 1 target pass</span>`;
+			} else out.innerHTML = `<span class="sum">—</span>`;
+
+			note.textContent = NOTES[step];
+			stepno.textContent = `step ${step + 1} / ${NOTES.length}`;
+			playBtn.textContent = timer ? 'Pause' : step === LAST ? 'Replay' : 'Play';
+		}
+
+		function stop() {
+			window.clearInterval(timer);
+			timer = 0;
+		}
+		function go(s: number) {
+			step = Math.max(0, Math.min(LAST, s));
+			render();
+		}
+		playBtn.addEventListener('click', () => {
+			if (timer) {
+				stop();
+				render();
+				return;
+			}
+			if (step === LAST) step = 0;
+			render();
+			timer = window.setInterval(() => {
+				if (step >= LAST) {
+					stop();
+					render();
+					return;
+				}
+				go(step + 1);
+			}, 2600);
+			render();
+		});
+		$('[data-act="prev"]').addEventListener('click', () => {
+			stop();
+			go(step - 1);
+		});
+		$('[data-act="next"]').addEventListener('click', () => {
+			stop();
+			go(step + 1);
+		});
+		render();
+	});
+</script>
+
+<style>
+	.dr {
+		--c-ok: #2f6fb3;
+		--c-dr: #b7791f;
+		--c-bad: #c2410c;
+		--c-bon: #2f7d4f;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .dr {
+		--c-ok: #4f8fd6;
+		--c-dr: #e0b04f;
+		--c-bad: #e06a2c;
+		--c-bon: #4fb07a;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .dr {
+			--c-ok: #4f8fd6;
+			--c-dr: #e0b04f;
+			--c-bad: #e06a2c;
+			--c-bon: #4fb07a;
+		}
+	}
+	.dr-controls {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.dr-step {
+		margin-left: auto;
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		color: var(--muted);
+	}
+	.dr-ctx {
+		margin: 1rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.8rem;
+	}
+	.dr-ctx .k {
+		margin-right: 0.6rem;
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--faint);
+	}
+	.dr-ctx :global(b) {
+		font-weight: 500;
+		color: var(--c-ok);
+	}
+	.dr-label {
+		margin: 1rem 0 0.35rem;
+		font-family: var(--mono);
+		font-size: 0.65rem;
+		color: var(--muted);
+	}
+	.dr-row {
+		display: grid;
+		grid-template-columns: repeat(8, minmax(0, 1fr));
+		gap: 4px;
+	}
+	.dr-out {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px;
+		min-height: 2.3rem;
+	}
+	.dr-rows :global(.cell) {
+		position: relative;
+		display: grid;
+		place-items: center;
+		min-height: 2.3rem;
+		padding: 0 0.15rem;
+		border: 1.5px solid transparent;
+		border-radius: 5px;
+		font-family: var(--mono);
+		font-size: 0.64rem;
+		overflow-wrap: anywhere;
+		hyphens: auto;
+		text-align: center;
+		line-height: 1.15;
+		transition: background 0.3s, border-color 0.3s, opacity 0.3s;
+	}
+	.dr-out :global(.cell) {
+		padding: 0 0.5rem;
+	}
+	.dr-rows :global(.cell.pop) {
+		animation: pop 0.45s both;
+		animation-delay: var(--d);
+	}
+	@keyframes pop {
+		from {
+			opacity: 0;
+			transform: translateY(-4px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+	.dr-rows :global(.cell.anc),
+	.sw.anc {
+		background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+		border-color: var(--accent);
+		font-weight: 600;
+	}
+	.dr-rows :global(.cell.mask),
+	.sw.mask {
+		background: repeating-linear-gradient(45deg, var(--code-bg) 0 3px, color-mix(in srgb, var(--c-dr) 22%, var(--surface)) 3px 6px);
+		border-color: var(--line);
+		color: var(--faint);
+	}
+	.dr-rows :global(.cell.draft),
+	.sw.draft {
+		background: color-mix(in srgb, var(--c-dr) 14%, var(--surface));
+		border: 1.5px dashed var(--c-dr);
+	}
+	.dr-rows :global(.cell.acc),
+	.sw.acc {
+		background: color-mix(in srgb, var(--c-ok) 16%, var(--surface));
+		border-color: var(--c-ok);
+	}
+	.dr-rows :global(.cell.bad),
+	.sw.bad {
+		border-color: var(--c-bad);
+		color: var(--c-bad);
+		text-decoration: line-through;
+	}
+	.dr-rows :global(.cell.gone),
+	.sw.gone {
+		border: 1.5px dashed var(--line);
+		opacity: 0.4;
+	}
+	.dr-rows :global(.cell.bon),
+	.sw.bon {
+		background: color-mix(in srgb, var(--c-bon) 18%, var(--surface));
+		border-color: var(--c-bon);
+	}
+	.dr-rows :global(.cell.pick) {
+		border: 1.5px solid var(--line);
+		color: var(--muted);
+	}
+	.dr-rows :global(.cell.pick.ok) {
+		border-color: var(--c-ok);
+		color: var(--fg);
+	}
+	.dr-rows :global(.cell.pick.bon) {
+		color: var(--fg);
+		border-color: var(--c-bon);
+	}
+	.dr-rows :global(.cell.blank) {
+		min-height: 2.3rem;
+	}
+	.dr-rows :global(.bar) {
+		position: absolute;
+		left: 3px;
+		bottom: 3px;
+		max-width: calc(100% - 6px);
+		height: 2px;
+		border-radius: 1px;
+		background: var(--c-dr);
+		opacity: 0.8;
+	}
+	.dr-rows :global(.cell.acc .bar) {
+		background: var(--c-ok);
+	}
+	.dr-rows :global(.cell.bad .bar) {
+		background: var(--c-bad);
+	}
+	.dr-rows :global(.m) {
+		position: absolute;
+		top: -0.55rem;
+		right: -0.2rem;
+		padding: 0 0.2rem;
+		border-radius: 3px;
+		background: var(--surface);
+		font-size: 0.7rem;
+		color: var(--c-ok);
+	}
+	.dr-rows :global(.cell.bon .m) {
+		color: var(--c-bad);
+	}
+	.dr-rows :global(.sum) {
+		margin-left: 0.4rem;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.dr-note {
+		min-height: 4.6em;
+		margin: 1.1rem 0 0;
+		padding: 0.7rem 0.9rem;
+		border-left: 3px solid var(--accent);
+		background: var(--code-bg);
+		border-radius: 0 6px 6px 0;
+		font-size: 0.95rem;
+		line-height: 1.5;
+	}
+	.dr-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 1rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.dr-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.sw {
+		width: 0.9rem;
+		height: 0.9rem;
+		display: inline-block;
+		border: 1.5px solid transparent;
+		border-radius: 3px;
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.dr {
+			padding: 1rem;
+		}
+		.dr-rows :global(.cell) {
+			font-size: 0.56rem;
+			padding: 0 0.1rem;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.dr-rows :global(.cell.pop) {
+			animation: none;
+		}
+	}
+</style>

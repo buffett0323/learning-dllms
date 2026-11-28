@@ -1,0 +1,228 @@
+---
+// DFlash 2's two-tap dynamic convolution (S03), drawn from the description in the release post.
+// Left: one conv. Each draft position t outputs k0 * x_t + k1 * x_{t-1}; the first draft position reads the
+// last verified token (the anchor). Coefficients = learned base kernel + a small correction from the hidden
+// state, shared per 16 channels. Right: where it sits, before and after each attention and MLP sublayer.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const xs = ['anchor', 'pos 1', 'pos 2', 'pos 3', 'pos 4'];
+const W = 76;
+const GAP = 22;
+const X0 = 70;
+const cx = (i: number) => X0 + i * (W + GAP) + W / 2;
+const yTop = 18;
+const yBot = 132;
+const H = 34;
+---
+
+<figure class="ct">
+	<div class="ct-row">
+		<svg class="ct-svg" viewBox="0 0 560 190" role="img" aria-label="Two-tap convolution: each draft position mixes its own vector with its left neighbour's; the first draft position reads the anchor.">
+			<defs>
+				<marker id="ct-a0" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+					<path d="M0,0 L8,4 L0,8 z" class="ar0" />
+				</marker>
+				<marker id="ct-a1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+					<path d="M0,0 L8,4 L0,8 z" class="ar1" />
+				</marker>
+			</defs>
+			<text x="8" y={yTop + H / 2 + 4} class="lab">x</text>
+			<text x="8" y={yBot + H / 2 + 4} class="lab">Conv(x)</text>
+
+			{xs.map((t, i) => (
+				<g>
+					<rect x={cx(i) - W / 2} y={yTop} width={W} height={H} rx="6" class:list={['box', { anc: i === 0 }]} />
+					<text x={cx(i)} y={yTop + H / 2 + 4} class="tok" text-anchor="middle">{t}</text>
+				</g>
+			))}
+			{xs.slice(1).map((t, j) => {
+				const i = j + 1;
+				return (
+					<g>
+						<line x1={cx(i)} y1={yTop + H} x2={cx(i)} y2={yBot - 3} class="k0" marker-end="url(#ct-a0)" />
+						<line x1={cx(i - 1) + 10} y1={yTop + H} x2={cx(i) - 10} y2={yBot - 3} class="k1" marker-end="url(#ct-a1)" />
+						<rect x={cx(i) - W / 2} y={yBot} width={W} height={H} rx="6" class="box out" />
+						<text x={cx(i)} y={yBot + H / 2 + 4} class="tok" text-anchor="middle">{t}</text>
+					</g>
+				);
+			})}
+			<text x={cx(1) + 6} y={(yTop + H + yBot) / 2 + 4} class="kl k0t">k₀</text>
+			<text x={(cx(0) + cx(1)) / 2 - 12} y={(yTop + H + yBot) / 2 - 6} class="kl k1t" text-anchor="end">k₁</text>
+		</svg>
+
+		<ol class="ct-stack" aria-label="One drafter layer">
+			<li class="cv">conv</li>
+			<li>attention</li>
+			<li class="cv">conv</li>
+			<li class="cv">conv</li>
+			<li>MLP</li>
+			<li class="cv">conv</li>
+			<li class="x">× 5 layers</li>
+		</ol>
+	</div>
+
+	<p class="ct-legend" aria-hidden="true">
+		<span><i class="ln k0"></i>k₀ · itself</span>
+		<span><i class="ln k1"></i>k₁ · its left neighbour</span>
+		<span><i class="sw anc"></i>anchor, the last verified token</span>
+	</p>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+	.ct {
+		--c-k0: #67625a;
+		--c-k1: #2f7d4f;
+		margin: 2rem 0;
+		padding: 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .ct {
+		--c-k0: #a8a298;
+		--c-k1: #4fb07a;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .ct {
+			--c-k0: #a8a298;
+			--c-k1: #4fb07a;
+		}
+	}
+	.ct-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 1.5rem;
+		align-items: center;
+	}
+	.ct-svg {
+		width: 100%;
+		height: auto;
+		font-family: var(--mono);
+	}
+	.lab {
+		font-size: 11px;
+		fill: var(--muted);
+	}
+	.tok {
+		font-size: 11px;
+		fill: var(--fg);
+	}
+	.kl {
+		font-size: 12px;
+		font-weight: 600;
+	}
+	.k0t {
+		fill: var(--c-k0);
+	}
+	.k1t {
+		fill: var(--c-k1);
+	}
+	.box {
+		fill: var(--code-bg);
+		stroke: var(--line);
+		stroke-width: 1.5;
+	}
+	.box.anc {
+		fill: color-mix(in srgb, var(--accent) 16%, var(--surface));
+		stroke: var(--accent);
+	}
+	.box.out {
+		fill: var(--surface);
+		stroke: var(--fg);
+		stroke-opacity: 0.35;
+	}
+	line.k0 {
+		stroke: var(--c-k0);
+		stroke-width: 1.6;
+	}
+	line.k1 {
+		stroke: var(--c-k1);
+		stroke-width: 1.8;
+		stroke-dasharray: 5 3;
+	}
+	.ar0 {
+		fill: var(--c-k0);
+	}
+	.ar1 {
+		fill: var(--c-k1);
+	}
+	.ct-stack {
+		display: grid;
+		gap: 4px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		text-align: center;
+	}
+	.ct-stack li {
+		padding: 0.3rem 0.8rem;
+		border: 1px solid var(--line);
+		border-radius: 5px;
+		background: var(--code-bg);
+	}
+	.ct-stack li.cv {
+		padding: 0.15rem 0.8rem;
+		border-color: var(--c-k1);
+		background: color-mix(in srgb, var(--c-k1) 14%, var(--surface));
+		color: var(--fg);
+	}
+	.ct-stack li.x {
+		border: 0;
+		background: none;
+		color: var(--muted);
+	}
+	.ct-legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		margin: 1rem 0 0;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		color: var(--muted);
+	}
+	.ct-legend span {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.ln {
+		width: 1.2rem;
+		border-top: 2px solid var(--c-k0);
+	}
+	.ln.k1 {
+		border-top: 2px dashed var(--c-k1);
+	}
+	.sw.anc {
+		width: 0.9rem;
+		height: 0.9rem;
+		border: 1.5px solid var(--accent);
+		border-radius: 3px;
+		background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+	}
+	figcaption {
+		margin-top: 0.8rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.ct {
+			padding: 1rem;
+		}
+		.ct-row {
+			grid-template-columns: 1fr;
+		}
+		.ct-stack {
+			grid-auto-flow: column;
+			grid-template-columns: none;
+		}
+		.ct-stack li {
+			padding: 0.3rem 0.4rem;
+		}
+	}
+</style>
