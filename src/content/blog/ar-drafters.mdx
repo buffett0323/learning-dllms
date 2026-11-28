@@ -41,7 +41,7 @@ The target cannot hand over features for positions it has not read. So the draft
 
 {/* Where the time goes, roughly, for LLaMA-3.1-8B at batch 1: a drafter pass loads one layer and the LM head, about 0.75B weights, against 8B for a target pass. Six drafter passes and one check cost about 1.6 target passes and return about six tokens. Plain decoding pays one target pass per token. */}
 
-## EAGLE 1, 2, 3
+## EAGLE Family (1, 2, 3)
 
 **EAGLE-1** autoregresses on features. The drafter predicts the target's next top-layer **feature** (the vector just before the LM head), and the target's LM head turns it into a token. The sampled token is also fed back, so the drafter knows which branch it is on. Its loss has two parts: match the feature, and match the token.
 
