@@ -91,9 +91,9 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 
 | # | Note | Hook | Status |
 | --- | --- | --- | --- |
-| S02 | AR drafters: Medusa to EAGLE-3 | Draft from the target's own features, one token per pass. | planned |
+| S02 | [AR drafters: from a small model to EAGLE-3](https://buffett0323.github.io/learning-dllms/posts/ar-drafters/) | Draft from the target's own features, one token per pass. | live |
 | S03 | [Diffusion drafters: DFlash 1 and 2](https://buffett0323.github.io/learning-dllms/posts/diffusion-drafters/) | A whole block in one pass. Then make the block hold together. | live |
-| S04 | DSpark | Between left to right and all at once, and verify only what is likely to pass. | planned |
+| S04 | [DSpark](https://buffett0323.github.io/learning-dllms/posts/dspark/) | Between left to right and all at once, and verify only what is likely to pass. | live |
 | S05 | Draft trees | Check several guesses at once, in one pass, with a tree mask. | planned |
 | S06 | Drafting for yourself | One model, two heads: diffusion drafts, AR checks. | planned |
 
@@ -122,6 +122,7 @@ This repository is the source for [dLLM Notes](https://buffett0323.github.io/lea
 | [d3LLM](https://buffett0323.github.io/learning-dllms/papers/d3llm/) | Pseudo-trajectory distillation, D2F-style multi-block decoding with KV refresh, the AUP metric | text only (license) |
 | [Nemotron-Labs-Sigma](https://buffett0323.github.io/learning-dllms/papers/sigma/) | Continuous diffusion on 16-d embeddings at 3B/8B against a matched masked model; packed CFG, DMD distillation, self-speculative decoding | on the PDF |
 | [DFlash](https://buffett0323.github.io/learning-dllms/papers/dflash/) | A 5-layer block diffusion drafter for AR models: one-pass drafting, target features injected as KV | on the PDF |
+| [DSpark](https://buffett0323.github.io/learning-dllms/papers/dspark/) | Parallel drafter plus a left-to-right Markov head; confidence-scheduled, load-aware verification in DeepSeek-V4 | on the PDF |
 
 <!-- ## Writing
 

@@ -1,0 +1,124 @@
+---
+title: 'AR drafters: from a small model to EAGLE-3'
+hook: 'Draft from the target''s own features, one token per pass.'
+description: 'The same draft, verify, keep loop as S01, with a better drafter. From a separate small model to EAGLE: a one-layer head that reads the target''s hidden features. What EAGLE-3 changes, why it needs training-time test, what it gains, and where a diffusion drafter takes over.'
+pubDate: '2026-11-28'
+---
+
+import EagleLap from '../../components/EagleLap.astro';
+import EagleRound from '../../components/EagleRound.astro';
+import Eagle1Arch from '../../components/Eagle1Arch.astro';
+import EagleTree from '../../components/EagleTree.astro';
+
+Every drafter in this track runs the loop of S01: draft a few tokens, let the target read them all in one pass, keep the longest prefix it agrees with plus one token of its own. Verification is unchanged, so the output is still exactly the target's. What changes is **the drafter**. This note covers drafters that guess one token per pass, left to right.
+
+## The classic drafter: a small model of the same family
+
+The first speculative decoding papers (Leviathan et al.; Chen et al., 2023) draft with a smaller model of the same family, such as Vicuna-68M for Vicuna-13B. It works: 1.9× on MT-bench, about 2.3 tokens per round. But:
+
+- **It reads the prompt on its own.** A 68M model understands the context far less than the 13B target, so its guesses are rejected early.
+- **It must share the target's tokenizer**, and a family with a small enough member does not always exist.
+
+## Draft from the target's features
+
+The target has already read the context. Its hidden states hold that reading. So instead of a separate model, train a small head next to the target that reads them:
+
+| | Small model | EAGLE |
+|---|---|---|
+| What the drafter is | a complete small LM | one decoder layer attached to the target |
+| What it reads | tokens only | the target's hidden features, plus tokens |
+| Runs on its own? | yes | no: without the target's features it has nothing to read |
+| Embedding and LM head | its own | the target's, frozen |
+| What is verified | one chain | a draft tree, several branches in one pass (S05) |
+
+Medusa (2024) takes the simplest form of this: several heads on the target's last hidden state, head $k$ guessing the token $k$ positions ahead. The heads are independent, so they do not see each other's guesses. EAGLE drafts autoregressively instead: each guess is fed back for the next.
+
+### One round, by position
+
+The target cannot hand over features for positions it has not read. So the drafter makes the guesses, one small pass each, and the target only checks them, in one pass:
+
+<EagleRound caption="A chain of 15 guesses after a 32-token prefix, with the first rejection at 40. Generating moves from the target to the drafter, 15 passes of one layer each; the target runs once, to check. In practice EAGLE drafts much shallower, as a tree (S05), since every guess costs a drafter pass and guesses deep in the chain rarely survive." />
+
+{/* Where the time goes, roughly, for LLaMA-3.1-8B at batch 1: a drafter pass loads one layer and the LM head, about 0.75B weights, against 8B for a target pass. Six drafter passes and one check cost about 1.6 target passes and return about six tokens. Plain decoding pays one target pass per token. */}
+
+## EAGLE 1, 2, 3
+
+**EAGLE-1** autoregresses on features. The drafter predicts the target's next top-layer **feature** (the vector just before the LM head), and the target's LM head turns it into a token. The sampled token is also fed back, so the drafter knows which branch it is on. Its loss has two parts: match the feature, and match the token.
+
+<Eagle1Arch caption="EAGLE-1's drafter. It reads the target's top-layer features, the vectors just before the LM head, together with the tokens one step ahead, and predicts the next feature. The target's LM head, shared and frozen, turns that into a token. The predicted feature and the sampled token are fed back, so the drafter runs left to right in feature space." />
+
+**EAGLE-2** keeps the drafter and changes the tree. A fixed tree shape spends the same guesses on easy and hard contexts. EAGLE-2 notices that the drafter's confidence roughly matches how often a guess is accepted, so it scores each node by $V$, the product of confidences along its path: an estimate of the chance the target accepts everything up to that node. It uses $V$ twice:
+
+1. **Grow.** At each depth, expand only the top-$k$ nodes by $V$. The tree goes deep where the drafter is sure and stays shallow where it is not.
+2. **Prune.** After drafting, keep the $m$ nodes with the highest $V$ in the whole tree, at any depth, and verify only those. $V$ never rises along a path, so the kept nodes always form a tree.
+
+<EagleTree caption="Toy numbers, with k = 2 and m = 6. The real settings are larger, but the budget is the same idea: a fixed number of nodes to verify, spent where acceptance is likely. V is DSpark's survival probability (S04); DSpark spends the budget across the whole batch and sets its size by load." />
+
+**EAGLE-3** changes what the drafter is trained to do and what it reads. One drafting lap first, in the paper's example: the prefix is "How can", and the target has written "I".
+
+<EagleLap caption="Step 1 reads only the target's fused features g, each paired with the embedding of the next token. Step 2 needs a feature for “I”, which the target has not read yet, so the drafter's own output a_I takes its place, paired with e(do). Earlier positions are read through the drafter's KV cache. Every later step works the same way, on the drafter's own outputs." />
+
+### 1. Cut the feature-prediction loss
+
+EAGLE-1 trains with two losses: match the target's next feature, and match the next token. The feature is only a means to the token. For a one-layer model, having to reproduce a high-dimensional vector exactly is an extra constraint, and it is why EAGLE stopped improving with more data. EAGLE-3 keeps only the token loss. The drafter's output $a$ is now **unconstrained**: any vector that leads the LM head to the right token will do.
+
+### 2. The train-test mismatch, and training-time test
+
+Cutting the loss breaks step 2. In training, with teacher forcing, every input is a real feature from the target. At test time, from step 2 on, inputs include the drafter's own $a$. In EAGLE-1 the feature loss kept $a$ close to the real feature, so the swap was mild. In EAGLE-3 nothing ties $a$ to a feature, so step 2 sees an input unlike anything in training. The paper measures it: with the loss removed and more data, acceptance of the first guess rises a lot, and acceptance of the second collapses.
+
+**Training-time test** closes the gap by showing the drafter, during training, the inputs it will see at test time: **its own outputs**, with whatever errors and quirks they have. After the normal step, the drafter feeds its outputs $a$ back as inputs and drafts again, with the token loss on these steps too. So it learns to draft well from its own $a$, not only from the target's clean features, and step 2 is no longer new at test time.
+
+All positions of a sequence do this together, with an extended attention mask for each simulated step, not one token at a time. Afterwards acceptance barely changes with the number of self-generated inputs, where EAGLE's drops at each one.
+
+### 3. Multi-layer feature fusion
+
+EAGLE-1 reads the top layer, the vector just before the LM head. That layer is tuned to the next token only, which makes the token after it hard to predict from it. EAGLE-1 had no choice: its output had to be a top-layer feature, so its input had to be one too. Once the feature loss is gone, the input is free. EAGLE-3 concatenates a low, a middle and a high layer of the target ($3k$ dimensions) and projects them back to $k$ with an FC layer: that is $g$. DFlash's five fused layers (S03) come from here.
+
+Ablation, LLaMA-3.1-8B, greedy, MT-bench:
+
+| | Speedup | Tokens per round |
+|---|---|---|
+| EAGLE-2 | 3.16× | 4.05 |
+| + no feature loss (with training-time test) | 3.82× | 5.37 |
+| + fused features (EAGLE-3) | 4.40× | 6.13 |
+
+## Results
+
+Batch 1, greedy, mean of five tasks:
+
+| Target | EAGLE-2 | EAGLE-3 | Tokens per round (EAGLE-3) |
+|---|---|---|---|
+| Vicuna-13B | 4.22× | 5.51× | 6.62 |
+| LLaMA-3.1-8B | 3.16× | 4.44× | 6.23 |
+| LLaMA-3.3-70B | 2.85× | 4.12× | 5.88 |
+
+Up to 6.5× on HumanEval, where code templates make drafting easy. With sampling (temperature 1), gains are smaller: 3.5–4.7×.
+
+{/* Under load, measured by the SGLang team (H100, LLaMA-3.1-8B, MT-bench): EAGLE-3 gives 1.81× throughput at batch 2 and still 1.38× at batch 64, while EAGLE drops below 1× from batch 24. Read with care: these runs use a **chain of 3 drafts, no tree**. With a 60-node tree, EAGLE-3 falls to 0.6× at 32 requests (S07). How much to verify has to shrink with load; DSpark (S04) makes that a scheduling decision. */}
+
+## EAGLE 3.1: keeping deep drafts stable
+
+EAGLE 3.1 (EAGLE, vLLM and TorchSpec teams, May 2026; blog post) targets a weakness that shows up in deployment: with long contexts, other chat templates or unfamiliar system prompts, acceptance drops. The authors call the cause **attention drift**: the deeper the drafter drafts on its own outputs, the more its attention moves away from the sink tokens at the start and onto its own guesses. They find two reasons and fix each with a normalization:
+
+- **Unbalanced fused input.** The high layer dominates the concatenation of low, mid and high features. Fix: normalize each target hidden state before the FC layer.
+- **Growing magnitude across steps.** The vector fed back is taken from the unnormalized residual path, so it grows with every step. Fix: feed back the hidden state after the final norm. Each step then looks more like a fresh call of the drafter than another layer stacked on top.
+
+The post reports up to 2× longer acceptance than EAGLE-3 on long contexts, and better carry-over from the depths seen in training to deeper drafting at test time. In vLLM it is a config option on the EAGLE-3 path, and old EAGLE-3 checkpoints still load.
+
+## Where a diffusion drafter takes over
+
+EAGLE-3 is the cheap AR drafter pushed as far as it goes. Its limits come from the one-layer, one-pass-per-guess design:
+
+- **Depth.** Each guess costs a drafter pass, so the drafter stays at one layer. A diffusion drafter pays one pass per block and can afford five. DSpark's Fig. 2 (S04): at the first position, where a miss loses the whole block, DFlash is accepted more often (chat 0.72 against 0.53).
+- **The tail is its strength.** After position 1, EAGLE-3 is flat or rising, since each guess sees the previous ones. DFlash falls along the block. DSpark and DFlash 2 add a small left-to-right part to a parallel drafter for exactly this.
+- **Where the features go.** EAGLE-3 adds the target's features to its input, where they fade as layers are added. DFlash injects them as keys and values in every layer (S03).
+
+## References
+
+1. Li, Wei, Zhang, Zhang. *EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test*. 2025. [arXiv](https://arxiv.org/abs/2503.01840)
+2. Li, Wei, Zhang, Zhang. *EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty*. ICML 2024. [arXiv](https://arxiv.org/abs/2401.15077)
+3. Li, Wei, Zhang, Zhang. *EAGLE-2: Faster Inference of Language Models with Dynamic Draft Trees*. EMNLP 2024. [arXiv](https://arxiv.org/abs/2406.16858)
+4. Cai et al. *Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads*. ICML 2024. [arXiv](https://arxiv.org/abs/2401.10774)
+5. Leviathan, Kalman, Matias. *Fast Inference from Transformers via Speculative Decoding*. ICML 2023. [arXiv](https://arxiv.org/abs/2211.17192)
+6. Papers by Hand. *Speculative Decoding, Explained: Why EAGLE-3 Finally Scales*. 2026. [Video](https://www.youtube.com/watch?v=aXdQ3JbRb98)
+7. EAGLE, vLLM and TorchSpec teams. *EAGLE 3.1: Advancing Speculative Decoding Through Collaboration Between the EAGLE Team, vLLM, and TorchSpec*. 2026. [Post](https://vllm.ai/blog/2026-05-26-eagle-3-1)

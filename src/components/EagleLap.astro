@@ -1,0 +1,242 @@
+---
+// EAGLE-3, two drafting steps (S02), after the example in the paper's Fig. 5. Prefix "How can"; the target has
+// written "I". Step 1: each input pairs the target's fused feature g with the embedding of the next token, goes
+// through an FC layer and the one decoder layer, and gives a; the LM head turns a_I into "do".
+// Step 2: the target has not read "I", so there is no g_I; the drafter's own a_I takes its place, paired with
+// e(do). The earlier positions are attended through the drafter's KV cache. Training-time test trains on this.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const O = 420; // x offset of step 2
+---
+
+<figure class="el">
+	<svg viewBox="0 0 760 420" role="img" aria-label="EAGLE-3 drafting: step 1 uses the target's fused features; step 2 has no feature for the new token and uses the drafter's own output instead.">
+		<defs>
+			<marker id="el-ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0,0 L8,4 L0,8 z" class="ink" />
+			</marker>
+			<marker id="el-arp" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0,0 L8,4 L0,8 z" class="pf" />
+			</marker>
+		</defs>
+
+		<!-- ===== step 1 ===== -->
+		<text x="20" y="22" class="h">① step 1</text>
+		<text x="92" y="22" class="t s">prefix “How can”; the target wrote “I”</text>
+		<rect x="50" y="36" width="60" height="26" rx="4" class="tokb" /><text x="80" y="53" text-anchor="middle" class="t">How</text>
+		<rect x="130" y="36" width="60" height="26" rx="4" class="tokb" /><text x="160" y="53" text-anchor="middle" class="t">can</text>
+		<rect x="210" y="36" width="50" height="26" rx="4" class="tokt" /><text x="235" y="53" text-anchor="middle" class="t">I</text>
+		<text x="235" y="78" text-anchor="middle" class="t s">target's own</text>
+
+		<text x="120" y="94" text-anchor="middle" class="t g">g = FC(low ‖ mid ‖ high)</text>
+		<rect x="50" y="100" width="60" height="24" rx="4" class="gbox" /><text x="80" y="116" text-anchor="middle" class="t">g<tspan class="sub" dy="3">How</tspan></text>
+		<rect x="50" y="126" width="60" height="22" rx="4" class="e" /><text x="80" y="141" text-anchor="middle" class="t">e<tspan class="sub" dy="3">can</tspan></text>
+		<rect x="130" y="100" width="60" height="24" rx="4" class="gbox" /><text x="160" y="116" text-anchor="middle" class="t">g<tspan class="sub" dy="3">can</tspan></text>
+		<rect x="130" y="126" width="60" height="22" rx="4" class="e" /><text x="160" y="141" text-anchor="middle" class="t">e<tspan class="sub" dy="3">I</tspan></text>
+
+		<path d="M80,148 L80,178" class="arrow" marker-end="url(#el-ar)" />
+		<path d="M160,148 L160,178" class="arrow" marker-end="url(#el-ar)" />
+		<rect x="40" y="182" width="200" height="50" rx="7" class="draft" />
+		<text x="140" y="203" text-anchor="middle" class="t b">drafter</text>
+		<text x="140" y="221" text-anchor="middle" class="t s">FC + 1 decoder layer</text>
+
+		<path d="M160,232 L160,250" class="arrow" marker-end="url(#el-ar)" />
+		<rect x="130" y="254" width="60" height="24" rx="4" class="a" /><text x="160" y="270" text-anchor="middle" class="t">a<tspan class="sub" dy="3">I</tspan></text>
+		<text x="122" y="270" text-anchor="end" class="t p">a: unconstrained</text>
+		<path d="M160,278 L160,294" class="arrow" marker-end="url(#el-ar)" />
+		<rect x="115" y="298" width="90" height="28" rx="5" class="head" /><text x="160" y="316" text-anchor="middle" class="t">LM head</text>
+		<path d="M160,326 L160,344" class="arrow" marker-end="url(#el-ar)" />
+		<rect x="135" y="348" width="50" height="28" rx="5" class="out" /><text x="160" y="366" text-anchor="middle" class="t b">do</text>
+
+		<!-- ===== step 2 ===== -->
+		<text x={O + 20} y="22" class="h">② step 2</text>
+		<text x={O + 92} y="22" class="t s">prefix “How can I”; drafted “do”</text>
+		<rect x={O + 30} y="36" width="50" height="26" rx="4" class="tokb" /><text x={O + 55} y="53" text-anchor="middle" class="t">How</text>
+		<rect x={O + 90} y="36" width="50" height="26" rx="4" class="tokb" /><text x={O + 115} y="53" text-anchor="middle" class="t">can</text>
+		<rect x={O + 150} y="36" width="50" height="26" rx="4" class="tokt" /><text x={O + 175} y="53" text-anchor="middle" class="t">I</text>
+		<rect x={O + 210} y="36" width="50" height="26" rx="4" class="out" /><text x={O + 235} y="53" text-anchor="middle" class="t">do</text>
+
+		<g class="cached">
+			<rect x={O + 30} y="100" width="50" height="48" rx="4" />
+			<rect x={O + 90} y="100" width="50" height="48" rx="4" />
+		</g>
+		<text x={O + 85} y="121" text-anchor="middle" class="t s">cached</text>
+		<text x={O + 85} y="135" text-anchor="middle" class="t s">K/V</text>
+
+		<rect x={O + 160} y="100" width="60" height="24" rx="4" class="a" /><text x={O + 190} y="116" text-anchor="middle" class="t">a<tspan class="sub" dy="3">I</tspan></text>
+		<rect x={O + 160} y="126" width="60" height="22" rx="4" class="e" /><text x={O + 190} y="141" text-anchor="middle" class="t">e<tspan class="sub" dy="3">do</tspan></text>
+		<rect x={O + 240} y="100" width="54" height="24" rx="4" class="miss" /><text x={O + 267} y="116" text-anchor="middle" class="t o">g<tspan class="sub" dy="3">I</tspan><tspan dy="-3"> ?</tspan></text>
+		<text x={O + 267} y="140" text-anchor="middle" class="t o s">target has</text>
+		<text x={O + 267} y="152" text-anchor="middle" class="t o s">not read “I”</text>
+
+		<path d={`M${O + 85},148 L${O + 85},178`} class="arrow faint" marker-end="url(#el-ar)" />
+		<path d={`M${O + 190},148 L${O + 190},178`} class="arrow" marker-end="url(#el-ar)" />
+		<rect x={O + 20} y="182" width="250" height="50" rx="7" class="draft" />
+		<text x={O + 145} y="203" text-anchor="middle" class="t b">drafter</text>
+		<text x={O + 145} y="221" text-anchor="middle" class="t s">the same layer, one more pass</text>
+
+		<path d={`M${O + 190},232 L${O + 190},250`} class="arrow" marker-end="url(#el-ar)" />
+		<rect x={O + 160} y="254" width="60" height="24" rx="4" class="a" /><text x={O + 190} y="270" text-anchor="middle" class="t">a<tspan class="sub" dy="3">do</tspan></text>
+		<path d={`M${O + 190},278 L${O + 190},294`} class="arrow" marker-end="url(#el-ar)" />
+		<rect x={O + 145} y="298" width="90" height="28" rx="5" class="head" /><text x={O + 190} y="316" text-anchor="middle" class="t">LM head</text>
+		<path d={`M${O + 190},326 L${O + 190},344`} class="arrow" marker-end="url(#el-ar)" />
+		<rect x={O + 165} y="348" width="50" height="28" rx="5" class="out" /><text x={O + 190} y="366" text-anchor="middle" class="t b">it</text>
+
+		<!-- a_I carried over -->
+		<path d={`M190,266 C330,266 300,84 ${O + 100},84 S${O + 186},86 ${O + 188},96`} class="carry" marker-end="url(#el-arp)" />
+		<text x="420" y="76" text-anchor="middle" class="t p">a<tspan class="sub" dy="3">I</tspan><tspan dy="-3"> stands in for g</tspan><tspan class="sub" dy="3">I</tspan></text>
+
+		<text x="380" y="404" text-anchor="middle" class="t s">Training-time test: training runs step ② too, on the drafter's own a, so this input is not new at test time.</text>
+	</svg>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+	.el {
+		--c-g: #2f7d4f;
+		--c-p: #7c4dbd;
+		--c-t: #2f6fb3;
+		--c-o: #b7791f;
+		margin: 2rem 0;
+		padding: 1rem 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .el {
+		--c-g: #4fb07a;
+		--c-p: #a98be0;
+		--c-t: #4f8fd6;
+		--c-o: #e0b04f;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .el {
+			--c-g: #4fb07a;
+			--c-p: #a98be0;
+			--c-t: #4f8fd6;
+			--c-o: #e0b04f;
+		}
+	}
+	svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		font-family: var(--mono);
+	}
+	.t {
+		font-size: 11px;
+		fill: var(--fg);
+	}
+	.t.s {
+		font-size: 9.5px;
+		fill: var(--muted);
+	}
+	.t.b {
+		font-size: 12.5px;
+		font-weight: 600;
+	}
+	.t.g {
+		fill: var(--c-g);
+	}
+	.t.p {
+		fill: var(--c-p);
+	}
+	.t.o {
+		fill: var(--c-o);
+	}
+	.sub {
+		font-size: 8px;
+	}
+	.h {
+		font-size: 12px;
+		font-weight: 600;
+		fill: var(--fg);
+	}
+	.tokb {
+		fill: var(--surface);
+		stroke: var(--fg);
+		stroke-opacity: 0.7;
+		stroke-width: 1.5;
+	}
+	.tokt {
+		fill: color-mix(in srgb, var(--c-t) 12%, var(--surface));
+		stroke: var(--c-t);
+		stroke-width: 1.8;
+	}
+	.gbox {
+		fill: color-mix(in srgb, var(--c-g) 20%, var(--surface));
+		stroke: var(--c-g);
+		stroke-width: 1.5;
+	}
+	.e {
+		fill: var(--surface);
+		stroke: var(--c-p);
+		stroke-width: 1.3;
+	}
+	.a {
+		fill: color-mix(in srgb, var(--c-p) 22%, var(--surface));
+		stroke: var(--c-p);
+		stroke-width: 1.5;
+	}
+	.miss {
+		fill: none;
+		stroke: var(--c-o);
+		stroke-width: 1.5;
+		stroke-dasharray: 4 3;
+	}
+	.cached rect {
+		fill: var(--code-bg);
+		stroke: var(--line);
+		stroke-width: 1.2;
+		stroke-dasharray: 3 2;
+	}
+	.draft {
+		fill: color-mix(in srgb, var(--c-t) 9%, var(--surface));
+		stroke: var(--c-t);
+		stroke-width: 1.8;
+	}
+	.head {
+		fill: var(--surface);
+		stroke: var(--c-t);
+		stroke-width: 1.5;
+	}
+	.out {
+		fill: color-mix(in srgb, var(--c-g) 14%, var(--surface));
+		stroke: var(--c-g);
+		stroke-width: 1.8;
+	}
+	.arrow {
+		fill: none;
+		stroke: var(--fg);
+		stroke-opacity: 0.75;
+		stroke-width: 1.4;
+	}
+	.arrow.faint {
+		stroke-dasharray: 3 3;
+		stroke-opacity: 0.4;
+	}
+	.carry {
+		fill: none;
+		stroke: var(--c-p);
+		stroke-width: 1.8;
+	}
+	.ink {
+		fill: var(--fg);
+	}
+	.pf {
+		fill: var(--c-p);
+	}
+	figcaption {
+		margin-top: 0.6rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.el {
+			padding: 0.75rem;
+		}
+	}
+</style>

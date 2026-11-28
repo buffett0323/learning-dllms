@@ -1,0 +1,200 @@
+---
+// EAGLE-1's drafter (S02). The target's top-layer features f (just before the LM head), paired with the
+// embeddings of the tokens one step ahead, go through a 1-layer drafter that predicts the next feature f̂.
+// The target's own LM head, shared and frozen, turns f̂ into a token. f̂ and the sampled token are fed back
+// for the next step: autoregression at the feature level.
+interface Props {
+	caption?: string;
+}
+const { caption } = Astro.props;
+const layers = [0, 1, 2, 3, 4, 5];
+const fx = [168, 194, 220, 246, 272];
+---
+
+<figure class="e1">
+	<svg viewBox="0 0 740 330" role="img" aria-label="EAGLE-1: target top-layer features and token embeddings go into a one-layer drafter, which predicts the next feature; the target's own LM head turns it into a token, which is fed back.">
+		<defs>
+			<marker id="e1-ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0,0 L8,4 L0,8 z" class="ink-fill" />
+			</marker>
+			<marker id="e1-arg" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0,0 L8,4 L0,8 z" class="g-fill" />
+			</marker>
+			<marker id="e1-arp" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0,0 L8,4 L0,8 z" class="p-fill" />
+			</marker>
+		</defs>
+
+		<!-- target model -->
+		<rect x="20" y="70" width="110" height="200" rx="8" class="box" />
+		<rect x="28" y="78" width="94" height="30" rx="5" class="top" />
+		<text x="75" y="98" text-anchor="middle" class="t g">top layer</text>
+		{layers.map((i) => <line x1="34" x2="116" y1={128 + i * 24} y2={128 + i * 24} class="layer" />)}
+		<text x="75" y="292" text-anchor="middle" class="t">target model</text>
+		<text x="75" y="308" text-anchor="middle" class="t s">frozen, unchanged</text>
+
+		<!-- features and token embeddings -->
+		<path d="M130,93 C150,93 150,150 160,158" class="arrow" marker-end="url(#e1-ar)" />
+		{fx.map((x) => <rect x={x} y="150" width="22" height="22" rx="3" class="f" />)}
+		{fx.map((x) => <rect x={x} y="176" width="22" height="16" rx="3" class="e" />)}
+		<text x="236" y="140" text-anchor="middle" class="t g">f: top-layer features</text>
+		<text x="220" y="208" text-anchor="middle" class="t s">+ e: embeddings of the</text>
+		<text x="220" y="221" text-anchor="middle" class="t s">tokens one step ahead</text>
+
+		<!-- drafter -->
+		<path d="M300,171 L316,171" class="arrow" marker-end="url(#e1-ar)" />
+		<rect x="322" y="135" width="146" height="72" rx="8" class="draft" />
+		<text x="395" y="166" text-anchor="middle" class="t b">drafter</text>
+		<text x="395" y="184" text-anchor="middle" class="t s">FC + 1 decoder layer</text>
+
+		<!-- predicted feature -->
+		<path d="M468,171 L484,171" class="arrow" marker-end="url(#e1-ar)" />
+		<rect x="490" y="160" width="22" height="22" rx="3" class="pred" />
+		<text x="501" y="200" text-anchor="middle" class="t p">f̂</text><text x="501" y="213" text-anchor="middle" class="t p s">next</text><text x="501" y="225" text-anchor="middle" class="t p s">feature</text>
+
+		<!-- LM head -->
+		<path d="M512,171 L540,171" class="arrow" marker-end="url(#e1-ar)" />
+		<rect x="546" y="140" width="96" height="62" rx="8" class="head" />
+		<text x="594" y="168" text-anchor="middle" class="t b">LM head</text>
+		<text x="594" y="185" text-anchor="middle" class="t s">target's own</text>
+
+		<!-- token -->
+		<path d="M642,171 L666,171" class="arrow" marker-end="url(#e1-ar)" />
+		<rect x="672" y="152" width="52" height="38" rx="6" class="tok" />
+		<text x="698" y="176" text-anchor="middle" class="t b">“do”</text>
+
+		<!-- borrowed head -->
+		<path d="M75,70 C90,34 560,30 594,132" class="borrow" marker-end="url(#e1-arg)" />
+		<text x="330" y="22" text-anchor="middle" class="t g">the target's LM head: shared and frozen, not rebuilt</text>
+
+		<!-- feedback loop -->
+		<path d="M698,190 C698,262 230,262 228,232" class="loop" marker-end="url(#e1-arp)" />
+		<text x="470" y="278" text-anchor="middle" class="t p">f̂ and the sampled token are fed back for the next guess</text>
+		<text x="395" y="122" text-anchor="middle" class="t s">autoregression at the feature level</text>
+	</svg>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+	.e1 {
+		--c-g: #2f6fb3;
+		--c-p: #2f7d4f;
+		margin: 2rem 0;
+		padding: 1rem 1.25rem;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+	}
+	:global(:root[data-theme='dark']) .e1 {
+		--c-g: #4f8fd6;
+		--c-p: #4fb07a;
+	}
+	@media (prefers-color-scheme: dark) {
+		:global(:root:not([data-theme='light'])) .e1 {
+			--c-g: #4f8fd6;
+			--c-p: #4fb07a;
+		}
+	}
+	svg {
+		display: block;
+		width: 100%;
+		height: auto;
+		font-family: var(--mono);
+	}
+	.t {
+		font-size: 11px;
+		fill: var(--fg);
+	}
+	.t.s {
+		font-size: 10px;
+		fill: var(--muted);
+	}
+	.t.b {
+		font-size: 13px;
+		font-weight: 600;
+	}
+	.t.g {
+		fill: var(--c-g);
+	}
+	.t.p {
+		fill: var(--c-p);
+	}
+	.box {
+		fill: var(--code-bg);
+		stroke: var(--fg);
+		stroke-opacity: 0.6;
+		stroke-width: 1.5;
+	}
+	.top {
+		fill: color-mix(in srgb, var(--c-g) 18%, var(--surface));
+	}
+	.layer {
+		stroke: var(--fg);
+		stroke-opacity: 0.45;
+		stroke-width: 1.5;
+	}
+	.f {
+		fill: color-mix(in srgb, var(--c-g) 18%, var(--surface));
+		stroke: var(--c-g);
+		stroke-width: 1.5;
+	}
+	.e {
+		fill: var(--code-bg);
+		stroke: var(--line);
+		stroke-width: 1.2;
+	}
+	.draft,
+	.head {
+		fill: color-mix(in srgb, var(--c-g) 8%, var(--surface));
+		stroke: var(--c-g);
+		stroke-width: 1.8;
+	}
+	.pred {
+		fill: color-mix(in srgb, var(--c-p) 14%, var(--surface));
+		stroke: var(--c-p);
+		stroke-width: 1.6;
+		stroke-dasharray: 4 2;
+	}
+	.tok {
+		fill: color-mix(in srgb, var(--c-p) 14%, var(--surface));
+		stroke: var(--c-p);
+		stroke-width: 1.8;
+	}
+	.arrow {
+		fill: none;
+		stroke: var(--fg);
+		stroke-opacity: 0.75;
+		stroke-width: 1.5;
+	}
+	.borrow {
+		fill: none;
+		stroke: var(--c-g);
+		stroke-width: 1.6;
+	}
+	.loop {
+		fill: none;
+		stroke: var(--c-p);
+		stroke-width: 1.5;
+		stroke-dasharray: 5 3;
+	}
+	.ink-fill {
+		fill: var(--fg);
+	}
+	.g-fill {
+		fill: var(--c-g);
+	}
+	.p-fill {
+		fill: var(--c-p);
+	}
+	figcaption {
+		margin-top: 0.6rem;
+		font-size: 0.95rem;
+		line-height: 1.55;
+		color: var(--muted);
+	}
+	@media (max-width: 640px) {
+		.e1 {
+			padding: 0.75rem;
+		}
+	}
+</style>

@@ -108,7 +108,7 @@ export const tracks: Track[] = [
 			{
 				title: 'Drafters',
 				notes: [
-					{ slug: 'ar-drafters', title: 'AR drafters: Medusa to EAGLE-3', hook: 'Draft from the target\'s own features, one token per pass.' },
+					{ slug: 'ar-drafters', title: 'AR drafters: from a small model to EAGLE-3', hook: 'Draft from the target\'s own features, one token per pass.' },
 					{ slug: 'diffusion-drafters', title: 'Diffusion drafters: DFlash 1 and 2', hook: 'A whole block in one pass. Then make the block hold together.' },
 					{ slug: 'dspark', title: 'DSpark', hook: 'Between left to right and all at once, and verify only what is likely to pass.' },
 					{ slug: 'draft-trees', title: 'Draft trees', hook: 'Check several guesses at once, in one pass, with a tree mask.' },
